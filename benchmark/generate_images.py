@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 """
-Генератор тестового набора OCI-образов для бенчмарка сканеров уязвимостей.
+Test image set generator for vulnerability scanner benchmarks.
 
-Моделирует реальный профиль нагрузки container registry:
-- Реальные base images (ubuntu, alpine, fedora, python, node, golang)
-- Производные образы с OS/pip/npm/Go зависимостями
-- Имитация CI/CD: несколько "версий" одного образа (общие слои, разный app layer)
+Models a realistic container registry workload:
+- Real base images (ubuntu, alpine, fedora, python, node, golang)
+- Derivative images with OS/pip/npm/Go dependencies
+- CI/CD simulation: multiple "versions" of the same image (shared layers, different app layer)
 
-Использование:
+Usage:
     python generate_images.py --registry localhost:5000 --derivatives-per-base 3
-    python generate_images.py --dry-run  # только показать что будет собрано
+    python generate_images.py --dry-run
 """
 
 import argparse
 import json
 import logging
-import os
 import random
 import subprocess
-import sys
-import tempfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -27,7 +24,7 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Пулы пакетов
+# Package pools
 # ---------------------------------------------------------------------------
 
 APT_PACKAGES = [
@@ -73,7 +70,6 @@ NPM_PACKAGES = [
     "redis@4.6.11", "ioredis@5.3.2",
 ]
 
-# Go модули: module path → версия
 GO_MODULES = {
     "github.com/gin-gonic/gin": "v1.9.1",
     "github.com/spf13/cobra": "v1.8.0",
@@ -88,7 +84,7 @@ GO_MODULES = {
 }
 
 # ---------------------------------------------------------------------------
-# Конфигурация base images
+# Base image definitions
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -96,7 +92,7 @@ class BaseImage:
     image: str           # e.g. "ubuntu:22.04"
     name: str            # short name for tags, e.g. "ubuntu"
     pkg_manager: str     # apt | apk | dnf
-    extra_types: list    # дополнительные типы производных: pip, npm, go
+    extra_types: list    # additional derivative types: pip, npm, go
 
 
 BASE_IMAGES = [
@@ -109,27 +105,27 @@ BASE_IMAGES = [
 ]
 
 # ---------------------------------------------------------------------------
-# Модель образа
+# Image model
 # ---------------------------------------------------------------------------
 
 @dataclass
 class ImageSpec:
-    """Спецификация одного образа для сборки."""
+    """Specification of a single image to build."""
     base: BaseImage
-    name: str                    # имя образа (без registry)
+    name: str                    # image name (without registry prefix)
     tag: str
     derivative_type: str         # os-deps | pip | npm | go
     os_packages: list = field(default_factory=list)
     pip_packages: list = field(default_factory=list)
     npm_packages: list = field(default_factory=list)
     go_modules: dict = field(default_factory=dict)
-    app_layer_size_mb: int = 0   # 0 = нет app layer
-    version: int = 1             # для CI/CD имитации
+    app_layer_size_mb: int = 0
+    version: int = 1
 
 
 @dataclass
 class BuiltImage:
-    """Результат сборки — для manifest.json."""
+    """Build result stored in manifest.json."""
     ref: str
     base_image: str
     derivative_type: str
@@ -138,7 +134,7 @@ class BuiltImage:
     size_bytes: int = 0
 
 # ---------------------------------------------------------------------------
-# Генерация Dockerfile и контекста
+# Dockerfile and build context generation
 # ---------------------------------------------------------------------------
 
 def _install_cmd(pkg_manager: str, packages: list[str]) -> str:
@@ -157,31 +153,25 @@ def _install_cmd(pkg_manager: str, packages: list[str]) -> str:
 def generate_dockerfile(spec: ImageSpec) -> str:
     lines = [f"FROM {spec.base.image}"]
 
-    # OS packages
     if spec.os_packages:
         lines.append(_install_cmd(spec.base.pkg_manager, spec.os_packages))
 
-    # pip
     if spec.pip_packages:
         lines.append("COPY requirements.txt /tmp/requirements.txt")
         lines.append("RUN pip install --no-cache-dir -r /tmp/requirements.txt")
 
-    # npm
     if spec.npm_packages:
         lines.append("WORKDIR /app")
         lines.append("COPY package.json /app/package.json")
         lines.append("RUN npm install --production")
 
-    # Go — multi-stage
     if spec.go_modules:
-        # Всё собирается внутри одного FROM (golang base уже имеет Go)
         lines.append("WORKDIR /build")
-        lines.append("COPY go.mod go.sum /build/")
-        lines.append("RUN go mod download")
+        lines.append("COPY go.mod /build/")
         lines.append("COPY main.go /build/")
+        lines.append("RUN go mod tidy")
         lines.append("RUN CGO_ENABLED=0 go build -o /app/server .")
 
-    # App layer (синтетический бинарник)
     if spec.app_layer_size_mb > 0:
         lines.append(f"COPY app-binary /app/binary-v{spec.version}")
 
@@ -189,11 +179,9 @@ def generate_dockerfile(spec: ImageSpec) -> str:
     return "\n".join(lines)
 
 
-def generate_go_files(modules: dict) -> tuple[str, str, str]:
-    """Возвращает (go.mod, go.sum, main.go)."""
-    require_lines = []
-    for mod, ver in modules.items():
-        require_lines.append(f"\t{mod} {ver}")
+def generate_go_files(modules: dict) -> tuple[str, str]:
+    """Return (go.mod, main.go) content."""
+    require_lines = [f"\t{mod} {ver}" for mod, ver in modules.items()]
 
     go_mod = f"""module benchmark/app
 
@@ -203,10 +191,7 @@ require (
 {chr(10).join(require_lines)}
 )
 """
-    # main.go: импортирует все модули чтобы они попали в бинарник
-    imports = []
-    for i, mod in enumerate(modules):
-        imports.append(f'\t_ "{mod}"')
+    imports = [f'\t_ "{mod}"' for mod in modules]
 
     main_go = f"""package main
 
@@ -216,28 +201,14 @@ import (
 
 func main() {{}}
 """
-    # go.sum будет сгенерирован через `go mod tidy` в Dockerfile
-    # Вместо этого добавим шаг в Dockerfile
-    return go_mod, "", main_go
+    return go_mod, main_go
 
 
 def write_build_context(spec: ImageSpec, build_dir: Path):
-    """Записывает Dockerfile и вспомогательные файлы в build_dir."""
-    dockerfile = generate_dockerfile(spec)
+    """Write Dockerfile and supporting files into build_dir."""
+    build_dir.mkdir(parents=True, exist_ok=True)
 
-    # Для Go: нужно сначала сгенерить go.sum, меняем Dockerfile
-    if spec.go_modules:
-        # Заменяем COPY go.sum на go mod tidy
-        dockerfile = dockerfile.replace(
-            "COPY go.mod go.sum /build/",
-            "COPY go.mod /build/\nCOPY main.go /build/\nRUN go mod tidy"
-        )
-        dockerfile = dockerfile.replace(
-            "COPY main.go /build/\nRUN CGO_ENABLED=0",
-            "RUN CGO_ENABLED=0"
-        )
-
-    (build_dir / "Dockerfile").write_text(dockerfile)
+    (build_dir / "Dockerfile").write_text(generate_dockerfile(spec))
 
     if spec.pip_packages:
         (build_dir / "requirements.txt").write_text(
@@ -261,15 +232,14 @@ def write_build_context(spec: ImageSpec, build_dir: Path):
         )
 
     if spec.go_modules:
-        go_mod, _, main_go = generate_go_files(spec.go_modules)
+        go_mod, main_go = generate_go_files(spec.go_modules)
         (build_dir / "go.mod").write_text(go_mod)
         (build_dir / "main.go").write_text(main_go)
 
     if spec.app_layer_size_mb > 0:
-        # Синтетический бинарник нужного размера с уникальным содержимым
         app_path = build_dir / "app-binary"
         with open(app_path, "wb") as f:
-            # Первые 1024 байта — уникальные (version seed), остальное — нули
+            # First 1024 bytes are unique (version seed), rest is zero-padded
             seed = f"version={spec.version},name={spec.name},tag={spec.tag}".encode()
             f.write(seed)
             f.write(b"\x00" * (1024 - len(seed)))
@@ -279,7 +249,7 @@ def write_build_context(spec: ImageSpec, build_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Генерация матрицы образов
+# Image matrix generation
 # ---------------------------------------------------------------------------
 
 def generate_image_matrix(
@@ -292,15 +262,11 @@ def generate_image_matrix(
     specs = []
 
     for base in BASE_IMAGES:
-        # Определяем доступные типы для этого base
-        available_types = ["os-deps"]
-        available_types.extend(base.extra_types)
+        available_types = ["os-deps"] + base.extra_types
 
         for d in range(derivatives_per_base):
-            # Выбираем тип производного образа
             deriv_type = available_types[d % len(available_types)]
 
-            # Пакеты ОС (3-8 штук)
             pkg_pool = {
                 "apt": APT_PACKAGES,
                 "apk": APK_PACKAGES,
@@ -319,7 +285,7 @@ def generate_image_matrix(
             elif deriv_type == "go":
                 mod_keys = rng.sample(list(GO_MODULES.keys()), k=rng.randint(3, 6))
                 go_mods = {k: GO_MODULES[k] for k in mod_keys}
-                os_pkgs = []  # golang base уже имеет всё нужное
+                os_pkgs = []  # golang base already has everything needed
 
             name = f"bench/{base.name}-{deriv_type}-{d:03d}"
 
@@ -341,11 +307,11 @@ def generate_image_matrix(
 
 
 # ---------------------------------------------------------------------------
-# Сборка и push
+# Build and push
 # ---------------------------------------------------------------------------
 
 def docker_build(spec: ImageSpec, registry: str, build_dir: Path) -> Optional[str]:
-    """Собирает образ, возвращает полный image ref или None при ошибке."""
+    """Build an image, return full image ref or None on failure."""
     ref = f"{registry}/{spec.name}:{spec.tag}" if registry else f"{spec.name}:{spec.tag}"
 
     write_build_context(spec, build_dir)
@@ -414,43 +380,47 @@ def collect_image_info(ref: str, spec: ImageSpec) -> BuiltImage:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Генератор тестового набора OCI-образов для бенчмарка сканеров"
+        description="Generate a test set of OCI images for vulnerability scanner benchmarks"
     )
     p.add_argument(
         "--registry", default="",
-        help="Адрес registry (например localhost:5000). Пусто = локальный Docker"
+        help="Registry address (e.g. localhost:5000). Empty = local Docker only"
     )
     p.add_argument(
         "--derivatives-per-base", type=int, default=5,
-        help="Количество производных образов на каждый base image (default: 5)"
+        help="Number of derivative images per base image (default: 5)"
     )
     p.add_argument(
         "--versions-per-derivative", type=int, default=3,
-        help="Количество версий (разный app layer) на каждый производный (default: 3)"
+        help="Number of versions (different app layer) per derivative (default: 3)"
     )
     p.add_argument(
         "--app-layer-size", type=int, default=10,
-        help="Размер синтетического app layer в МБ (default: 10)"
+        help="Synthetic app layer size in MB (default: 10)"
     )
     p.add_argument(
         "--seed", type=int, default=42,
-        help="Random seed для воспроизводимости (default: 42)"
+        help="Random seed for reproducibility (default: 42)"
     )
     p.add_argument(
         "--push", action="store_true",
-        help="Пушить образы в registry после сборки"
+        help="Push images to the registry after building"
     )
     p.add_argument(
         "--dry-run", action="store_true",
-        help="Только показать план сборки, не собирать"
+        help="Only print the build plan, do not build anything"
+    )
+    p.add_argument(
+        "--build-dir", type=Path, default=Path("images"),
+        help="Directory for Dockerfiles and build contexts (default: images/)"
     )
     p.add_argument(
         "--output-manifest", type=Path, default=Path("manifest.json"),
-        help="Путь для сохранения манифеста (default: manifest.json)"
+        help="Path to save the image manifest (default: manifest.json)"
     )
     p.add_argument(
         "-v", "--verbose", action="store_true",
-        help="Подробный вывод"
+        help="Verbose output"
     )
     return p.parse_args()
 
@@ -469,18 +439,17 @@ def main():
         seed=args.seed,
     )
 
-    # Подсчёт уникальных derivative (без учёта версий)
     unique_derivatives = {s.name for s in specs}
 
     log.info(
-        f"Матрица: {len(BASE_IMAGES)} bases × {args.derivatives_per_base} derivatives "
-        f"× {args.versions_per_derivative} versions = {len(specs)} образов "
-        f"({len(unique_derivatives)} уникальных derivative)"
+        f"Matrix: {len(BASE_IMAGES)} bases x {args.derivatives_per_base} derivatives "
+        f"x {args.versions_per_derivative} versions = {len(specs)} images "
+        f"({len(unique_derivatives)} unique derivatives)"
     )
 
     if args.dry_run:
         print(f"\n{'='*70}")
-        print(f"DRY RUN: {len(specs)} образов будет собрано")
+        print(f"DRY RUN: {len(specs)} images to build")
         print(f"{'='*70}\n")
         for spec in specs:
             ref = f"{args.registry}/{spec.name}:{spec.tag}" if args.registry else f"{spec.name}:{spec.tag}"
@@ -498,30 +467,26 @@ def main():
             print(f"  {ref:55s}  [{', '.join(pkg_info)}]")
         return
 
-    # Сборка
+    # Build
     built: list[BuiltImage] = []
     failed = 0
 
-    with tempfile.TemporaryDirectory(prefix="bench-") as tmpdir:
-        for i, spec in enumerate(specs):
-            log.info(f"[{i+1}/{len(specs)}] {spec.name}:{spec.tag}")
+    for i, spec in enumerate(specs):
+        log.info(f"[{i+1}/{len(specs)}] {spec.name}:{spec.tag}")
 
-            # Отдельная поддиректория для каждого образа
-            build_dir = Path(tmpdir) / f"{spec.name.replace('/', '_')}_{spec.tag}"
-            build_dir.mkdir(parents=True, exist_ok=True)
+        build_dir = args.build_dir / f"{spec.name.replace('/', '_')}_{spec.tag}"
+        ref = docker_build(spec, args.registry, build_dir)
+        if ref is None:
+            failed += 1
+            continue
 
-            ref = docker_build(spec, args.registry, build_dir)
-            if ref is None:
+        if args.push:
+            if not docker_push(ref):
                 failed += 1
                 continue
 
-            if args.push:
-                if not docker_push(ref):
-                    failed += 1
-                    continue
-
-            img = collect_image_info(ref, spec)
-            built.append(img)
+        img = collect_image_info(ref, spec)
+        built.append(img)
 
     # Manifest
     manifest = {
@@ -547,9 +512,9 @@ def main():
         total_size += img.size_bytes
 
     print(f"\n{'='*50}")
-    print(f"Собрано:  {len(built)} образов ({failed} ошибок)")
-    print(f"Слоёв:   {sum(len(img.layers) for img in built)} всего, {len(all_layers)} уникальных")
-    print(f"Размер:  {total_size / 1024**3:.1f} GB (суммарный, с учётом shared layers)")
+    print(f"Built:   {len(built)} images ({failed} failed)")
+    print(f"Layers:  {sum(len(img.layers) for img in built)} total, {len(all_layers)} unique")
+    print(f"Size:    {total_size / 1024**3:.1f} GB (sum, including shared layers)")
     print(f"{'='*50}")
 
 

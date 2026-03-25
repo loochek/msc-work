@@ -227,9 +227,9 @@ def _generate_dockerfile_go(spec: ImageSpec) -> str:
     return "\n".join(lines)
 
 
-def generate_go_files(modules: dict, version: int) -> tuple[str, str]:
+def generate_go_files(spec: ImageSpec) -> tuple[str, str]:
     """Return (go.mod, main.go) content."""
-    require_lines = [f"\t{mod} {ver}" for mod, ver in modules.items()]
+    require_lines = [f"\t{mod} {ver}" for mod, ver in spec.go_modules.items()]
 
     go_mod = f"""module benchmark/app
 
@@ -239,7 +239,9 @@ require (
 {chr(10).join(require_lines)}
 )
 """
-    imports = [f'\t_ "{mod}"' for mod in modules]
+    imports = [f'\t_ "{mod}"' for mod in spec.go_modules]
+    spec_json = _spec_to_json(spec).replace('"', '\\"').replace('\n', '\\n')
+
     main_go = f"""package main
 
 import (
@@ -247,10 +249,10 @@ import (
 {chr(10).join(imports)}
 )
 
-var version = "1.0.{version}"
+var spec = "{spec_json}"
 
 func main() {{
-\tfmt.Println(version)
+\tfmt.Println(spec)
 }}
 """
     return go_mod, main_go
@@ -287,11 +289,25 @@ def write_build_context(spec: ImageSpec, build_dir: Path):
         )
 
     if spec.go_modules:
-        go_mod, main_go = generate_go_files(spec.go_modules, spec.version)
+        go_mod, main_go = generate_go_files(spec)
         (build_dir / "go.mod").write_text(go_mod)
         (build_dir / "main.go").write_text(main_go)
     else:
         _write_src_dir(spec, build_dir)
+
+
+def _spec_to_json(spec: ImageSpec) -> str:
+    return json.dumps({
+        "name": spec.name,
+        "tag": spec.tag,
+        "base": spec.base.image,
+        "derivative_type": spec.derivative_type,
+        "version": spec.version,
+        "os_packages": spec.os_packages,
+        "pip_packages": spec.pip_packages,
+        "npm_packages": spec.npm_packages,
+        "go_modules": spec.go_modules,
+    }, indent=2)
 
 
 def _write_src_dir(spec: ImageSpec, build_dir: Path):
@@ -302,23 +318,25 @@ def _write_src_dir(spec: ImageSpec, build_dir: Path):
     src_dir = build_dir / "src"
     src_dir.mkdir(parents=True, exist_ok=True)
 
-    version_str = f"1.0.{spec.version}"
+    spec_json = _spec_to_json(spec)
 
     if spec.pip_packages:
         (src_dir / "app.py").write_text(
-            f'"""Benchmark app"""\n'
-            f"VERSION = \"{version_str}\"\n"
-            f"print(f\"{{VERSION}} {{__name__}}\")\n"
+            f"import json\n\n"
+            f"SPEC = json.loads('''\n{spec_json}\n''')\n\n"
+            f"if __name__ == \"__main__\":\n"
+            f"    print(json.dumps(SPEC, indent=2))\n"
         )
     elif spec.npm_packages:
         (src_dir / "index.js").write_text(
-            f"const VERSION = \"{version_str}\";\n"
-            f"console.log(VERSION);\n"
+            f"const SPEC = {spec_json};\n\n"
+            f"console.log(JSON.stringify(SPEC, null, 2));\n"
         )
     else:
+        (src_dir / "spec.json").write_text(spec_json + "\n")
         (src_dir / "run.sh").write_text(
             f"#!/bin/sh\n"
-            f"echo \"{version_str}\"\n"
+            f"cat /app/src/spec.json\n"
         )
 
 

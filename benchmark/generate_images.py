@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
+
 """
-Test image set generator for vulnerability scanner benchmarks.
-
-Models a realistic container registry workload:
-- Real base images (ubuntu, alpine, fedora, python, node, golang)
-- Derivative images with OS/pip/npm/Go dependencies
-- CI/CD simulation: multiple "versions" of the same image (shared layers, different app layer)
-
-Usage:
-    python generate_images.py --registry localhost:5000 --derivatives-per-base 3
-    python generate_images.py --dry-run
+Test image set generator for vulnerability scanner benchmarks
 """
 
 import argparse
@@ -17,15 +9,53 @@ import json
 import logging
 import random
 import subprocess
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Package pools
-# ---------------------------------------------------------------------------
+###############################################################################
+
+@dataclass
+class BaseImage:
+    image: str                      # e.g. "ubuntu:22.04"
+    name: str                       # short name for tags, e.g. "ubuntu"
+    pkg_manager: str                # apt | apk | dnf
+    allowed_derivative_types: list  # pip | npm | go
+
+
+@dataclass
+class ImageSpec:
+    """
+    Specification of a single image to build
+    """
+
+    base: BaseImage
+    name: str                    # image name (without registry prefix)
+    tag: str
+    derivative_type: str         # os-deps | pip | npm | go
+    os_packages: list
+    pip_packages: list
+    npm_packages: list
+    go_modules: dict
+    version: int = 1
+
+
+@dataclass
+class BuiltImage:
+    """
+    Build result stored in manifest.json
+    """
+
+    ref: str
+    base_image: str
+    derivative_type: str
+    version: int
+    layers: list
+    size_bytes: int = 0
+
+###############################################################################
 
 APT_PACKAGES = [
     "curl", "wget", "vim-tiny", "git", "build-essential", "libssl-dev",
@@ -83,61 +113,71 @@ GO_MODULES = {
     "google.golang.org/grpc": "v1.60.0",
 }
 
-# ---------------------------------------------------------------------------
-# Base image definitions
-# ---------------------------------------------------------------------------
-
-@dataclass
-class BaseImage:
-    image: str           # e.g. "ubuntu:22.04"
-    name: str            # short name for tags, e.g. "ubuntu"
-    pkg_manager: str     # apt | apk | dnf
-    extra_types: list    # additional derivative types: pip, npm, go
-
-
 BASE_IMAGES = [
-    BaseImage("ubuntu:22.04", "ubuntu", "apt", []),
-    BaseImage("alpine:3.18", "alpine", "apk", []),
-    BaseImage("fedora:39", "fedora", "dnf", []),
+    BaseImage("ubuntu:22.04", "ubuntu", "apt", ["os-deps"]),
+    BaseImage("alpine:3.18", "alpine", "apk", ["os-deps"]),
+    BaseImage("fedora:39", "fedora", "dnf", ["os-deps"]),
     BaseImage("python:3.11-slim", "python", "apt", ["pip"]),
     BaseImage("node:20-slim", "node", "apt", ["npm"]),
     BaseImage("golang:1.21", "golang", "apt", ["go"]),
 ]
 
-# ---------------------------------------------------------------------------
-# Image model
-# ---------------------------------------------------------------------------
+###############################################################################
 
-@dataclass
-class ImageSpec:
-    """Specification of a single image to build."""
-    base: BaseImage
-    name: str                    # image name (without registry prefix)
-    tag: str
-    derivative_type: str         # os-deps | pip | npm | go
-    os_packages: list = field(default_factory=list)
-    pip_packages: list = field(default_factory=list)
-    npm_packages: list = field(default_factory=list)
-    go_modules: dict = field(default_factory=dict)
-    app_layer_size_mb: int = 0
-    version: int = 1
+def generate_image_matrix(
+    derivatives_per_base: int,
+    versions_per_derivative: int,
+    seed: int,
+) -> list[ImageSpec]:
+    rng = random.Random(seed)
+    specs = []
 
+    for base in BASE_IMAGES:
+        available_types = base.allowed_derivative_types
 
-@dataclass
-class BuiltImage:
-    """Build result stored in manifest.json."""
-    ref: str
-    base_image: str
-    derivative_type: str
-    version: int
-    layers: list = field(default_factory=list)
-    size_bytes: int = 0
+        for d in range(derivatives_per_base):
+            derivative_type = available_types[d % len(available_types)]
 
-# ---------------------------------------------------------------------------
-# Dockerfile and build context generation
-# ---------------------------------------------------------------------------
+            pkg_pool = {
+                "apt": APT_PACKAGES,
+                "apk": APK_PACKAGES,
+                "dnf": DNF_PACKAGES,
+            }[base.pkg_manager]
+            os_pkgs = sorted(rng.sample(pkg_pool, k=rng.randint(3, 8)))
 
-def _install_cmd(pkg_manager: str, packages: list[str]) -> str:
+            pip_pkgs = []
+            npm_pkgs = []
+            go_mods = {}
+
+            if derivative_type == "pip":
+                pip_pkgs = sorted(rng.sample(PIP_PACKAGES, k=rng.randint(4, 10)))
+            elif derivative_type == "npm":
+                npm_pkgs = sorted(rng.sample(NPM_PACKAGES, k=rng.randint(4, 10)))
+            elif derivative_type == "go":
+                mod_keys = rng.sample(list(GO_MODULES.keys()), k=rng.randint(3, 6))
+                go_mods = {k: GO_MODULES[k] for k in mod_keys}
+                os_pkgs = []  # will be ignored
+
+            name = f"bench/{base.name}-{derivative_type}-{d:03d}"
+
+            for v in range(1, versions_per_derivative + 1):
+                specs.append(ImageSpec(
+                    base=base,
+                    name=name,
+                    tag=f"v{v}",
+                    derivative_type=derivative_type,
+                    os_packages=os_pkgs,
+                    pip_packages=pip_pkgs,
+                    npm_packages=npm_pkgs,
+                    go_modules=go_mods,
+                    version=v,
+                ))
+
+    return specs
+
+###############################################################################
+
+def make_install_cmd(pkg_manager: str, packages: list[str]) -> str:
     if not packages:
         return ""
     pkgs = " ".join(packages)
@@ -151,10 +191,13 @@ def _install_cmd(pkg_manager: str, packages: list[str]) -> str:
 
 
 def generate_dockerfile(spec: ImageSpec) -> str:
+    if spec.go_modules:
+        return _generate_dockerfile_go(spec)
+
     lines = [f"FROM {spec.base.image}"]
 
     if spec.os_packages:
-        lines.append(_install_cmd(spec.base.pkg_manager, spec.os_packages))
+        lines.append(make_install_cmd(spec.base.pkg_manager, spec.os_packages))
 
     if spec.pip_packages:
         lines.append("COPY requirements.txt /tmp/requirements.txt")
@@ -165,21 +208,26 @@ def generate_dockerfile(spec: ImageSpec) -> str:
         lines.append("COPY package.json /app/package.json")
         lines.append("RUN npm install --production")
 
-    if spec.go_modules:
-        lines.append("WORKDIR /build")
-        lines.append("COPY go.mod /build/")
-        lines.append("COPY main.go /build/")
-        lines.append("RUN go mod tidy")
-        lines.append("RUN CGO_ENABLED=0 go build -o /app/server .")
-
-    if spec.app_layer_size_mb > 0:
-        lines.append(f"COPY app-binary /app/binary-v{spec.version}")
-
+    lines.append("COPY src/ /app/src/")
     lines.append('CMD ["sleep", "infinity"]')
     return "\n".join(lines)
 
 
-def generate_go_files(modules: dict) -> tuple[str, str]:
+def _generate_dockerfile_go(spec: ImageSpec) -> str:
+    lines = [f"FROM {spec.base.image} AS builder"]
+    lines.append("WORKDIR /build")
+    lines.append("COPY go.mod /build/")
+    lines.append("COPY main.go /build/")
+    lines.append("RUN go mod tidy")
+    lines.append("RUN CGO_ENABLED=0 go build -o /server .")
+    lines.append("")
+    lines.append("FROM scratch")
+    lines.append("COPY --from=builder /server /server")
+    lines.append('ENTRYPOINT ["/server"]')
+    return "\n".join(lines)
+
+
+def generate_go_files(modules: dict, version: int) -> tuple[str, str]:
     """Return (go.mod, main.go) content."""
     require_lines = [f"\t{mod} {ver}" for mod, ver in modules.items()]
 
@@ -192,20 +240,27 @@ require (
 )
 """
     imports = [f'\t_ "{mod}"' for mod in modules]
-
     main_go = f"""package main
 
 import (
+\t"fmt"
 {chr(10).join(imports)}
 )
 
-func main() {{}}
+var version = "1.0.{version}"
+
+func main() {{
+\tfmt.Println(version)
+}}
 """
     return go_mod, main_go
 
 
 def write_build_context(spec: ImageSpec, build_dir: Path):
-    """Write Dockerfile and supporting files into build_dir."""
+    """
+    Write Dockerfile and supporting files into build_dir
+    """
+
     build_dir.mkdir(parents=True, exist_ok=True)
 
     (build_dir / "Dockerfile").write_text(generate_dockerfile(spec))
@@ -218,7 +273,7 @@ def write_build_context(spec: ImageSpec, build_dir: Path):
     if spec.npm_packages:
         pkg_json = {
             "name": "benchmark-app",
-            "version": "1.0.0",
+            "version": f"1.0.{spec.version}",
             "dependencies": {},
         }
         for pkg in spec.npm_packages:
@@ -232,86 +287,46 @@ def write_build_context(spec: ImageSpec, build_dir: Path):
         )
 
     if spec.go_modules:
-        go_mod, main_go = generate_go_files(spec.go_modules)
+        go_mod, main_go = generate_go_files(spec.go_modules, spec.version)
         (build_dir / "go.mod").write_text(go_mod)
         (build_dir / "main.go").write_text(main_go)
-
-    if spec.app_layer_size_mb > 0:
-        app_path = build_dir / "app-binary"
-        with open(app_path, "wb") as f:
-            # First 1024 bytes are unique (version seed), rest is zero-padded
-            seed = f"version={spec.version},name={spec.name},tag={spec.tag}".encode()
-            f.write(seed)
-            f.write(b"\x00" * (1024 - len(seed)))
-            remaining = spec.app_layer_size_mb * 1024 * 1024 - 1024
-            if remaining > 0:
-                f.write(b"\x00" * remaining)
+    else:
+        _write_src_dir(spec, build_dir)
 
 
-# ---------------------------------------------------------------------------
-# Image matrix generation
-# ---------------------------------------------------------------------------
+def _write_src_dir(spec: ImageSpec, build_dir: Path):
+    """
+    Generate version-specific source files for the src layer
+    """
 
-def generate_image_matrix(
-    derivatives_per_base: int,
-    versions_per_derivative: int,
-    app_layer_size_mb: int,
-    seed: int,
-) -> list[ImageSpec]:
-    rng = random.Random(seed)
-    specs = []
+    src_dir = build_dir / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
 
-    for base in BASE_IMAGES:
-        available_types = ["os-deps"] + base.extra_types
+    version_str = f"1.0.{spec.version}"
 
-        for d in range(derivatives_per_base):
-            deriv_type = available_types[d % len(available_types)]
+    if spec.pip_packages:
+        (src_dir / "app.py").write_text(
+            f'"""Benchmark app"""\n'
+            f"VERSION = \"{version_str}\"\n"
+            f"print(f\"{{VERSION}} {{__name__}}\")\n"
+        )
+    elif spec.npm_packages:
+        (src_dir / "index.js").write_text(
+            f"const VERSION = \"{version_str}\";\n"
+            f"console.log(VERSION);\n"
+        )
+    else:
+        (src_dir / "run.sh").write_text(
+            f"#!/bin/sh\n"
+            f"echo \"{version_str}\"\n"
+        )
 
-            pkg_pool = {
-                "apt": APT_PACKAGES,
-                "apk": APK_PACKAGES,
-                "dnf": DNF_PACKAGES,
-            }[base.pkg_manager]
-            os_pkgs = sorted(rng.sample(pkg_pool, k=rng.randint(3, 8)))
-
-            pip_pkgs = []
-            npm_pkgs = []
-            go_mods = {}
-
-            if deriv_type == "pip":
-                pip_pkgs = sorted(rng.sample(PIP_PACKAGES, k=rng.randint(4, 10)))
-            elif deriv_type == "npm":
-                npm_pkgs = sorted(rng.sample(NPM_PACKAGES, k=rng.randint(4, 10)))
-            elif deriv_type == "go":
-                mod_keys = rng.sample(list(GO_MODULES.keys()), k=rng.randint(3, 6))
-                go_mods = {k: GO_MODULES[k] for k in mod_keys}
-                os_pkgs = []  # golang base already has everything needed
-
-            name = f"bench/{base.name}-{deriv_type}-{d:03d}"
-
-            for v in range(1, versions_per_derivative + 1):
-                specs.append(ImageSpec(
-                    base=base,
-                    name=name,
-                    tag=f"v{v}",
-                    derivative_type=deriv_type,
-                    os_packages=os_pkgs,
-                    pip_packages=pip_pkgs,
-                    npm_packages=npm_pkgs,
-                    go_modules=go_mods,
-                    app_layer_size_mb=app_layer_size_mb,
-                    version=v,
-                ))
-
-    return specs
-
-
-# ---------------------------------------------------------------------------
-# Build and push
-# ---------------------------------------------------------------------------
 
 def docker_build(spec: ImageSpec, registry: str, build_dir: Path) -> Optional[str]:
-    """Build an image, return full image ref or None on failure."""
+    """
+    Build an image, return full image ref or None on failure
+    """
+
     ref = f"{registry}/{spec.name}:{spec.tag}" if registry else f"{spec.name}:{spec.tag}"
 
     write_build_context(spec, build_dir)
@@ -374,9 +389,7 @@ def collect_image_info(ref: str, spec: ImageSpec) -> BuiltImage:
     )
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+###############################################################################
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -393,10 +406,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--versions-per-derivative", type=int, default=3,
         help="Number of versions (different app layer) per derivative (default: 3)"
-    )
-    p.add_argument(
-        "--app-layer-size", type=int, default=10,
-        help="Synthetic app layer size in MB (default: 10)"
     )
     p.add_argument(
         "--seed", type=int, default=42,
@@ -435,7 +444,6 @@ def main():
     specs = generate_image_matrix(
         derivatives_per_base=args.derivatives_per_base,
         versions_per_derivative=args.versions_per_derivative,
-        app_layer_size_mb=args.app_layer_size,
         seed=args.seed,
     )
 
@@ -462,12 +470,9 @@ def main():
                 pkg_info.append(f"{len(spec.npm_packages)} npm")
             if spec.go_modules:
                 pkg_info.append(f"{len(spec.go_modules)} go-mods")
-            if spec.app_layer_size_mb:
-                pkg_info.append(f"{spec.app_layer_size_mb}MB app")
             print(f"  {ref:55s}  [{', '.join(pkg_info)}]")
         return
 
-    # Build
     built: list[BuiltImage] = []
     failed = 0
 
@@ -490,12 +495,10 @@ def main():
 
     # Manifest
     manifest = {
-        "generator": "benchmark/generate_images.py",
         "params": {
             "registry": args.registry,
             "derivatives_per_base": args.derivatives_per_base,
             "versions_per_derivative": args.versions_per_derivative,
-            "app_layer_size_mb": args.app_layer_size,
             "seed": args.seed,
         },
         "images": [asdict(img) for img in built],
@@ -504,7 +507,6 @@ def main():
     args.output_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
     log.info(f"Manifest saved to {args.output_manifest}")
 
-    # Summary
     all_layers = set()
     total_size = 0
     for img in built:

@@ -93,7 +93,7 @@ PIP_PACKAGES = [
 NPM_PACKAGES = [
     "express@4.18.2", "lodash@4.17.21", "axios@1.6.2",
     "moment@2.29.4", "webpack@5.89.0", "typescript@5.3.2",
-    "react@18.2.0", "react-dom@18.2.0", "next@14.0.3",
+    "react@18.3.1", "react-dom@18.3.1", "next@14.0.3",
     "dotenv@16.3.1", "winston@3.11.0", "uuid@9.0.0",
     "cors@2.8.5", "jsonwebtoken@9.0.2", "bcryptjs@2.4.3",
     "mongoose@8.0.2", "sequelize@6.35.1", "pg@8.11.3",
@@ -119,7 +119,7 @@ BASE_IMAGES = [
     BaseImage("fedora:39", "fedora", "dnf", ["os-deps"]),
     BaseImage("python:3.11-slim", "python", "apt", ["pip"]),
     BaseImage("node:20-slim", "node", "apt", ["npm"]),
-    BaseImage("golang:1.21", "golang", "apt", ["go"]),
+    BaseImage("golang:1.23", "golang", "apt", ["go"]),
 ]
 
 ###############################################################################
@@ -206,7 +206,7 @@ def generate_dockerfile(spec: ImageSpec) -> str:
     if spec.npm_packages:
         lines.append("WORKDIR /app")
         lines.append("COPY package.json /app/package.json")
-        lines.append("RUN npm install --production")
+        lines.append("RUN npm install --omit=dev --legacy-peer-deps")
 
     lines.append("COPY src/ /app/src/")
     lines.append('CMD ["sleep", "infinity"]')
@@ -233,7 +233,7 @@ def generate_go_files(spec: ImageSpec) -> tuple[str, str]:
 
     go_mod = f"""module benchmark/app
 
-go 1.21
+go 1.23
 
 require (
 {chr(10).join(require_lines)}

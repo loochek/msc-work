@@ -38,7 +38,7 @@ class ImageSpec:
     os_packages: list
     pip_packages: list
     npm_packages: list
-    go_modules: dict
+    go_modules: list             # list of (module_path, import_path, version)
     version: int = 1
 
 
@@ -100,18 +100,19 @@ NPM_PACKAGES = [
     "redis@4.6.11", "ioredis@5.3.2",
 ]
 
-GO_MODULES = {
-    "github.com/gin-gonic/gin": "v1.9.1",
-    "github.com/spf13/cobra": "v1.8.0",
-    "github.com/spf13/viper": "v1.18.1",
-    "go.uber.org/zap": "v1.26.0",
-    "gorm.io/gorm": "v1.25.5",
-    "gorm.io/driver/postgres": "v1.5.4",
-    "github.com/go-redis/redis/v8": "v8.11.5",
-    "github.com/gorilla/mux": "v1.8.1",
-    "github.com/prometheus/client_golang": "v1.17.0",
-    "google.golang.org/grpc": "v1.60.0",
-}
+# (module path for go.mod, import path for source, version)
+GO_MODULES = [
+    ("github.com/gin-gonic/gin",             "github.com/gin-gonic/gin",                        "v1.9.1"),
+    ("github.com/spf13/cobra",               "github.com/spf13/cobra",                          "v1.8.0"),
+    ("github.com/spf13/viper",               "github.com/spf13/viper",                          "v1.18.1"),
+    ("go.uber.org/zap",                       "go.uber.org/zap",                                "v1.26.0"),
+    ("gorm.io/gorm",                          "gorm.io/gorm",                                   "v1.25.5"),
+    ("gorm.io/driver/postgres",               "gorm.io/driver/postgres",                        "v1.5.4"),
+    ("github.com/go-redis/redis/v8",          "github.com/go-redis/redis/v8",                   "v8.11.5"),
+    ("github.com/gorilla/mux",                "github.com/gorilla/mux",                         "v1.8.1"),
+    ("github.com/prometheus/client_golang",   "github.com/prometheus/client_golang/prometheus", "v1.17.0"),
+    ("google.golang.org/grpc",                "google.golang.org/grpc",                         "v1.60.0"),
+]
 
 BASE_IMAGES = [
     BaseImage("ubuntu:22.04", "ubuntu", "apt", ["os-deps"]),
@@ -154,8 +155,7 @@ def generate_image_matrix(
             elif derivative_type == "npm":
                 npm_pkgs = sorted(rng.sample(NPM_PACKAGES, k=rng.randint(4, 10)))
             elif derivative_type == "go":
-                mod_keys = rng.sample(list(GO_MODULES.keys()), k=rng.randint(3, 6))
-                go_mods = {k: GO_MODULES[k] for k in mod_keys}
+                go_mods = rng.sample(GO_MODULES, k=rng.randint(3, 6))
                 os_pkgs = []  # will be ignored
 
             name = f"bench/{base.name}-{derivative_type}-{d:03d}"
@@ -229,7 +229,7 @@ def _generate_dockerfile_go(spec: ImageSpec) -> str:
 
 def generate_go_files(spec: ImageSpec) -> tuple[str, str]:
     """Return (go.mod, main.go) content."""
-    require_lines = [f"\t{mod} {ver}" for mod, ver in spec.go_modules.items()]
+    require_lines = [f"\t{mod} {ver}" for mod, _, ver in spec.go_modules]
 
     go_mod = f"""module benchmark/app
 
@@ -239,7 +239,7 @@ require (
 {chr(10).join(require_lines)}
 )
 """
-    imports = [f'\t_ "{mod}"' for mod in spec.go_modules]
+    imports = [f'\t_ "{imp}"' for _, imp, _ in spec.go_modules]
     spec_json = _spec_to_json(spec).replace('"', '\\"').replace('\n', '\\n')
 
     main_go = f"""package main
@@ -306,7 +306,7 @@ def _spec_to_json(spec: ImageSpec) -> str:
         "os_packages": spec.os_packages,
         "pip_packages": spec.pip_packages,
         "npm_packages": spec.npm_packages,
-        "go_modules": spec.go_modules,
+        "go_modules": {mod: ver for mod, _, ver in spec.go_modules},
     }, indent=2)
 
 

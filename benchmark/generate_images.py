@@ -209,7 +209,14 @@ def generate_dockerfile(spec: ImageSpec) -> str:
         lines.append("RUN npm install --omit=dev --legacy-peer-deps")
 
     lines.append("COPY src/ /app/src/")
-    lines.append('CMD ["sleep", "infinity"]')
+
+    if spec.pip_packages:
+        lines.append('CMD ["python", "/app/src/app.py"]')
+    elif spec.npm_packages:
+        lines.append('CMD ["node", "/app/src/index.js"]')
+    else:
+        lines.append('CMD ["sh", "/app/src/run.sh"]')
+
     return "\n".join(lines)
 
 

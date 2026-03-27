@@ -6,6 +6,9 @@ Scans images from manifest.json, collects timing / severity / cache metrics.
 """
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -40,6 +43,31 @@ SEVERITY_MAP_CLAIR = {
 }
 
 
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def make_clair_jwt(psk: str, issuer: str = "clairctl", ttl: int = 300) -> str:
+    """Generate a JWT signed with Clair PSK (HS256). No PyJWT dependency."""
+    key = base64.b64decode(psk)
+    header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    now = int(time.time())
+    claims = _b64url(json.dumps({
+        "iss": issuer,
+        "exp": now + ttl,
+        "iat": now,
+    }).encode())
+    payload = f"{header}.{claims}"
+    sig = _b64url(hmac.new(key, payload.encode(), hashlib.sha256).digest())
+    return f"{payload}.{sig}"
+
+
+def _clair_headers(psk: str) -> dict:
+    if not psk:
+        return {}
+    return {"Authorization": f"Bearer {make_clair_jwt(psk)}"}
+
+
 def empty_vulns() -> dict:
     return {"critical": 0, "high": 0, "medium": 0, "low": 0, "other": 0}
 
@@ -62,11 +90,18 @@ class ScanResult:
 
 def _parse_trivy_layer_digests(stderr: str) -> tuple[list[str], list[str]]:
     """Returns (missed_layers, all_layers) from Trivy --debug stderr."""
-    missed = re.findall(r"Missing diff ID in cache: (sha256:\w+)", stderr)
-    all_match = re.search(r"Diff IDs: \[([^\]]+)\]", stderr)
+    # old format: "Missing diff ID in cache: sha256:..."
+    # new format: "Missing diff ID in cache\tdiff_id=\"sha256:...\""
+    missed = re.findall(r"Missing diff ID in cache.*?(sha256:\w+)", stderr)
+
+    # old format: "Diff IDs: [sha256:... sha256:...]"
+    # new format: "Detected diff ID\tdiff_ids=[sha256:... sha256:...]"
     all_layers = []
+    all_match = re.search(r"diff_ids?=\[([^\]]+)\]", stderr, re.IGNORECASE)
+    if not all_match:
+        all_match = re.search(r"Diff IDs: \[([^\]]+)\]", stderr)
     if all_match:
-        all_layers = [s.strip() for s in all_match.group(1).split() if s.strip()]
+        all_layers = re.findall(r"sha256:\w+", all_match.group(1))
     return missed, all_layers
 
 
@@ -177,9 +212,10 @@ def _parse_clair_logs(logs: str) -> tuple[list[str], list[str], list[str]]:
 
 def run_clair(image_ref: str, insecure: bool = False,
               clair_url: str = "", registry: str = "",
-              clair_indexer_container: str = "", **_) -> ScanResult:
+              clair_indexer_container: str = "", clair_psk: str = "", **_) -> ScanResult:
     r = ScanResult(scanner="clair", image_ref=image_ref)
     verify = not insecure
+    auth = _clair_headers(clair_psk)
 
     # fetch OCI manifest from registry to build Clair payload
     ref = image_ref
@@ -221,7 +257,7 @@ def run_clair(image_ref: str, insecure: bool = False,
     try:
         resp = requests.post(
             f"{clair_url}/indexer/api/v1/index_report",
-            json=payload, verify=verify,
+            json=payload, headers=auth, verify=verify,
         )
         r.index_time_s = round(time.monotonic() - t0, 3)
         if resp.status_code not in (200, 201):
@@ -238,7 +274,7 @@ def run_clair(image_ref: str, insecure: bool = False,
     try:
         resp = requests.get(
             f"{clair_url}/matcher/api/v1/vulnerability_report/{manifest_digest}",
-            verify=verify,
+            headers=auth, verify=verify,
         )
         r.match_time_s = round(time.monotonic() - t0, 3)
         r.wall_time_s = round(r.index_time_s + r.match_time_s, 3)
@@ -279,9 +315,10 @@ SCANNERS = {
 
 
 def clear_clair_cache(images: list[dict], registry: str,
-                      clair_url: str, insecure: bool):
+                      clair_url: str, insecure: bool, clair_psk: str = ""):
     """Delete all index reports from Clair via bulk DELETE API."""
     verify = not insecure
+    auth = _clair_headers(clair_psk)
 
     # collect manifest digests by fetching from registry
     digests = []
@@ -314,7 +351,7 @@ def clear_clair_cache(images: list[dict], registry: str,
         resp = requests.delete(
             f"{clair_url}/indexer/api/v1/index_report",
             json=digests,
-            headers={"Content-Type": "application/vnd.clair.bulk_delete.v1+json"},
+            headers={"Content-Type": "application/vnd.clair.bulk_delete.v1+json", **auth},
             verify=verify,
         )
         if resp.status_code == 200:
@@ -367,6 +404,8 @@ def parse_args() -> argparse.Namespace:
                    help="Clair API base URL (required for --scanners clair)")
     p.add_argument("--clair-indexer-container", default="clair-indexer",
                    help="Docker container name for Clair indexer (for log parsing)")
+    p.add_argument("--clair-psk", default="",
+                   help="Base64-encoded PSK for Clair JWT auth (from clair config auth.psk.key)")
     p.add_argument("--insecure", action="store_true",
                    help="Skip TLS verification for registry and Clair")
     p.add_argument("--output", type=Path, default=Path("results.json"),
@@ -400,7 +439,8 @@ def main():
             log.info("Clearing Trivy scan cache")
             subprocess.run(["trivy", "clean", "--scan-cache"], capture_output=True)
         if "clair" in args.scanners:
-            clear_clair_cache(images, registry, args.clair_url, args.insecure)
+            clear_clair_cache(images, registry, args.clair_url,
+                              args.insecure, args.clair_psk)
 
     results = run_all(
         images=images,
@@ -409,6 +449,7 @@ def main():
         clair_url=args.clair_url,
         registry=registry,
         clair_indexer_container=args.clair_indexer_container,
+        clair_psk=args.clair_psk,
     )
 
     output = {

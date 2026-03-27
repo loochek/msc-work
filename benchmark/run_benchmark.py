@@ -50,7 +50,7 @@ def _b64url(data: bytes) -> str:
 def make_clair_jwt(psk: str, issuer: str = "clairctl", leeway: int = 60) -> str:
     """Generate a JWT signed with Clair PSK (HS256), matching clairctl behavior."""
     key = base64.b64decode(psk)
-    header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    header = _b64url(json.dumps({"alg": "HS256"}, separators=(",", ":")).encode())
     now = int(time.time())
     claims = _b64url(json.dumps({
         "iss": issuer,

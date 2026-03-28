@@ -270,9 +270,12 @@ def run_grype(image_ref: str, insecure: bool = False, **_) -> ScanResult:
 
 def _parse_clair_logs(logs: str) -> tuple[list[str], list[str], list[str]]:
     """Returns (fetched, scanned, cached) layer digests from Clair indexer logs."""
-    fetched = list(set(re.findall(r"layer fetch start.*?layer=(sha256:\w+)", logs)))
-    scanned = list(set(re.findall(r"scan start.*?layer=(sha256:\w+)", logs)))
-    cached = list(set(re.findall(r"layer already scanned.*?layer=(sha256:\w+)", logs)))
+    # layer digest may be quoted or unquoted depending on Clair version:
+    #   layer="sha256:abc..."  (fetch logs, new format)
+    #   layer=sha256:abc...    (scan logs)
+    fetched = list(set(re.findall(r"layer fetch start.*?layer=\"?(sha256:\w+)", logs)))
+    scanned = list(set(re.findall(r"scanLayer.*?scan start.*?layer=\"?(sha256:\w+)", logs)))
+    cached = list(set(re.findall(r"layer already scanned.*?layer=\"?(sha256:\w+)", logs)))
     return fetched, scanned, cached
 
 

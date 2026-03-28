@@ -69,13 +69,44 @@ def _clair_headers(psk: str) -> dict:
     return {"Authorization": f"Bearer {make_clair_jwt(psk)}"}
 
 
-def _registry_get(url: str, headers: dict = None, verify: bool = True) -> requests.Response:
-    """GET with OCI distribution token auth (handles 401 + Www-Authenticate)."""
-    hdrs = dict(headers or {})
-    resp = requests.get(url, headers=hdrs, verify=verify)
+def _registry_token(registry: str, repo: str, verify: bool = True) -> str:
+    """Obtain a bearer token from registry for the given repository."""
+    resp = requests.get(f"https://{registry}/v2/", verify=verify)
     if resp.status_code != 401:
+        return ""
+
+    www_auth = resp.headers.get("Www-Authenticate", "")
+    if not www_auth.startswith("Bearer "):
+        return ""
+
+    params = dict(re.findall(r'(\w+)="([^"]*)"', www_auth))
+    realm = params.get("realm", "")
+    if not realm:
+        return ""
+
+    token_params = {}
+    if "service" in params:
+        token_params["service"] = params["service"]
+    token_params["scope"] = f"repository:{repo}:pull"
+
+    token_resp = requests.get(realm, params=token_params, verify=verify)
+    if token_resp.status_code != 200:
+        return ""
+
+    return token_resp.json().get("token", "")
+
+
+def _registry_get(url: str, headers: dict = None, verify: bool = True,
+                  token: str = "") -> requests.Response:
+    """GET with optional bearer token, or auto-negotiate on 401."""
+    hdrs = dict(headers or {})
+    if token:
+        hdrs["Authorization"] = f"Bearer {token}"
+    resp = requests.get(url, headers=hdrs, verify=verify)
+    if resp.status_code != 401 or token:
         return resp
 
+    # auto-negotiate from Www-Authenticate
     www_auth = resp.headers.get("Www-Authenticate", "")
     if not www_auth.startswith("Bearer "):
         return resp
@@ -95,11 +126,11 @@ def _registry_get(url: str, headers: dict = None, verify: bool = True) -> reques
     if token_resp.status_code != 200:
         return resp
 
-    token = token_resp.json().get("token", "")
-    if not token:
+    new_token = token_resp.json().get("token", "")
+    if not new_token:
         return resp
 
-    hdrs["Authorization"] = f"Bearer {token}"
+    hdrs["Authorization"] = f"Bearer {new_token}"
     return requests.get(url, headers=hdrs, verify=verify)
 
 
@@ -259,6 +290,9 @@ def run_clair(image_ref: str, insecure: bool = False,
     name, tag = ref.rsplit(":", 1) if ":" in ref else (ref, "latest")
     base_url = f"https://{registry}"
 
+    # get registry bearer token for this repo (used by us and passed to Clair)
+    reg_token = _registry_token(registry, name, verify=verify)
+
     try:
         resp = _registry_get(
             f"{base_url}/v2/{name}/manifests/{tag}",
@@ -267,6 +301,7 @@ def run_clair(image_ref: str, insecure: bool = False,
                 "application/vnd.docker.distribution.manifest.v2+json",
             ])},
             verify=verify,
+            token=reg_token,
         )
         resp.raise_for_status()
         manifest = resp.json()
@@ -276,12 +311,17 @@ def run_clair(image_ref: str, insecure: bool = False,
         r.exit_code = 1
         return r
 
+    # pass registry token to Clair so it can fetch layers
+    layer_headers = {}
+    if reg_token:
+        layer_headers = {"Authorization": [f"Bearer {reg_token}"]}
+
     payload = {
         "hash": manifest_digest,
         "layers": [{
             "hash": layer["digest"],
             "uri": f"{base_url}/v2/{name}/blobs/{layer['digest']}",
-            "headers": {},
+            "headers": layer_headers,
         } for layer in manifest.get("layers", [])],
     }
 

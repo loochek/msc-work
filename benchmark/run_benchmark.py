@@ -69,6 +69,40 @@ def _clair_headers(psk: str) -> dict:
     return {"Authorization": f"Bearer {make_clair_jwt(psk)}"}
 
 
+def _registry_get(url: str, headers: dict = None, verify: bool = True) -> requests.Response:
+    """GET with OCI distribution token auth (handles 401 + Www-Authenticate)."""
+    hdrs = dict(headers or {})
+    resp = requests.get(url, headers=hdrs, verify=verify)
+    if resp.status_code != 401:
+        return resp
+
+    www_auth = resp.headers.get("Www-Authenticate", "")
+    if not www_auth.startswith("Bearer "):
+        return resp
+
+    params = dict(re.findall(r'(\w+)="([^"]*)"', www_auth))
+    realm = params.get("realm", "")
+    if not realm:
+        return resp
+
+    token_params = {}
+    if "service" in params:
+        token_params["service"] = params["service"]
+    if "scope" in params:
+        token_params["scope"] = params["scope"]
+
+    token_resp = requests.get(realm, params=token_params, verify=verify)
+    if token_resp.status_code != 200:
+        return resp
+
+    token = token_resp.json().get("token", "")
+    if not token:
+        return resp
+
+    hdrs["Authorization"] = f"Bearer {token}"
+    return requests.get(url, headers=hdrs, verify=verify)
+
+
 def empty_vulns() -> dict:
     return {"critical": 0, "high": 0, "medium": 0, "low": 0, "other": 0}
 
@@ -226,7 +260,7 @@ def run_clair(image_ref: str, insecure: bool = False,
     base_url = f"https://{registry}"
 
     try:
-        resp = requests.get(
+        resp = _registry_get(
             f"{base_url}/v2/{name}/manifests/{tag}",
             headers={"Accept": ", ".join([
                 "application/vnd.oci.image.manifest.v1+json",
@@ -330,7 +364,7 @@ def clear_clair_cache(images: list[dict], registry: str,
         name, tag = ref.rsplit(":", 1) if ":" in ref else (ref, "latest")
 
         try:
-            resp = requests.get(
+            resp = _registry_get(
                 f"https://{registry}/v2/{name}/manifests/{tag}",
                 headers={"Accept": ", ".join([
                     "application/vnd.oci.image.manifest.v1+json",

@@ -11,7 +11,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import re
 import subprocess
 import tempfile
@@ -69,9 +68,9 @@ def _clair_headers(psk: str) -> dict:
     return {"Authorization": f"Bearer {make_clair_jwt(psk)}"}
 
 
-def _registry_token(registry: str, repo: str, verify: bool = True) -> str:
+def _registry_token(registry: str, repo: str) -> str:
     """Obtain a bearer token from registry for the given repository."""
-    resp = requests.get(f"https://{registry}/v2/", verify=verify)
+    resp = requests.get(f"https://{registry}/v2/")
     if resp.status_code != 401:
         return ""
 
@@ -89,20 +88,20 @@ def _registry_token(registry: str, repo: str, verify: bool = True) -> str:
         token_params["service"] = params["service"]
     token_params["scope"] = f"repository:{repo}:pull"
 
-    token_resp = requests.get(realm, params=token_params, verify=verify)
+    token_resp = requests.get(realm, params=token_params)
     if token_resp.status_code != 200:
         return ""
 
     return token_resp.json().get("token", "")
 
 
-def _registry_get(url: str, headers: dict = None, verify: bool = True,
+def _registry_get(url: str, headers: dict = None,
                   token: str = "") -> requests.Response:
     """GET with optional bearer token, or auto-negotiate on 401."""
     hdrs = dict(headers or {})
     if token:
         hdrs["Authorization"] = f"Bearer {token}"
-    resp = requests.get(url, headers=hdrs, verify=verify)
+    resp = requests.get(url, headers=hdrs)
     if resp.status_code != 401 or token:
         return resp
 
@@ -122,7 +121,7 @@ def _registry_get(url: str, headers: dict = None, verify: bool = True,
     if "scope" in params:
         token_params["scope"] = params["scope"]
 
-    token_resp = requests.get(realm, params=token_params, verify=verify)
+    token_resp = requests.get(realm, params=token_params)
     if token_resp.status_code != 200:
         return resp
 
@@ -131,7 +130,7 @@ def _registry_get(url: str, headers: dict = None, verify: bool = True,
         return resp
 
     hdrs["Authorization"] = f"Bearer {new_token}"
-    return requests.get(url, headers=hdrs, verify=verify)
+    return requests.get(url, headers=hdrs)
 
 
 def empty_vulns() -> dict:
@@ -171,14 +170,12 @@ def _parse_trivy_layer_digests(stderr: str) -> tuple[list[str], list[str]]:
     return missed, all_layers
 
 
-def run_trivy(image_ref: str, insecure: bool = False, **_) -> ScanResult:
+def run_trivy(image_ref: str, **_) -> ScanResult:
     cmd = [
         "trivy", "image", "--format", "json",
         "--debug", "--skip-db-update", "--skip-java-db-update",
+        image_ref,
     ]
-    if insecure:
-        cmd.append("--insecure")
-    cmd.append(image_ref)
 
     t0 = time.monotonic()
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -206,12 +203,7 @@ def run_trivy(image_ref: str, insecure: bool = False, **_) -> ScanResult:
 
 ###############################################################################
 
-def run_grype(image_ref: str, insecure: bool = False, **_) -> ScanResult:
-    env = dict(os.environ)
-    if insecure:
-        env["SYFT_REGISTRY_INSECURE_SKIP_TLS_VERIFY"] = "true"
-        env["GRYPE_REGISTRY_INSECURE_SKIP_TLS_VERIFY"] = "true"
-
+def run_grype(image_ref: str, **_) -> ScanResult:
     r = ScanResult(scanner="grype", image_ref=image_ref)
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -222,7 +214,7 @@ def run_grype(image_ref: str, insecure: bool = False, **_) -> ScanResult:
         t0 = time.monotonic()
         proc_syft = subprocess.run(
             ["syft", image_ref, "-o", f"json={sbom_path}"],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True,
         )
         r.index_time_s = round(time.monotonic() - t0, 3)
 
@@ -235,7 +227,7 @@ def run_grype(image_ref: str, insecure: bool = False, **_) -> ScanResult:
         t0 = time.monotonic()
         proc_grype = subprocess.run(
             ["grype", f"sbom:{sbom_path}", "-o", "json"],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True,
         )
         r.match_time_s = round(time.monotonic() - t0, 3)
 
@@ -279,11 +271,9 @@ def _parse_clair_logs(logs: str) -> tuple[list[str], list[str], list[str]]:
     return fetched, scanned, cached
 
 
-def run_clair(image_ref: str, insecure: bool = False,
-              clair_url: str = "", registry: str = "",
+def run_clair(image_ref: str, clair_url: str = "", registry: str = "",
               clair_indexer_container: str = "", clair_psk: str = "", **_) -> ScanResult:
     r = ScanResult(scanner="clair", image_ref=image_ref)
-    verify = not insecure
     auth = _clair_headers(clair_psk)
 
     # fetch OCI manifest from registry to build Clair payload
@@ -294,7 +284,7 @@ def run_clair(image_ref: str, insecure: bool = False,
     base_url = f"https://{registry}"
 
     # get registry bearer token for this repo (used by us and passed to Clair)
-    reg_token = _registry_token(registry, name, verify=verify)
+    reg_token = _registry_token(registry, name)
 
     try:
         resp = _registry_get(
@@ -303,7 +293,6 @@ def run_clair(image_ref: str, insecure: bool = False,
                 "application/vnd.oci.image.manifest.v1+json",
                 "application/vnd.docker.distribution.manifest.v2+json",
             ])},
-            verify=verify,
             token=reg_token,
         )
         resp.raise_for_status()
@@ -335,7 +324,7 @@ def run_clair(image_ref: str, insecure: bool = False,
     try:
         resp = requests.post(
             f"{clair_url}/indexer/api/v1/index_report",
-            json=payload, headers=auth, verify=verify,
+            json=payload, headers=auth,
         )
         r.index_time_s = round(time.monotonic() - t0, 3)
         if resp.status_code not in (200, 201):
@@ -352,7 +341,7 @@ def run_clair(image_ref: str, insecure: bool = False,
     try:
         resp = requests.get(
             f"{clair_url}/matcher/api/v1/vulnerability_report/{manifest_digest}",
-            headers=auth, verify=verify,
+            headers=auth,
         )
         r.match_time_s = round(time.monotonic() - t0, 3)
         r.wall_time_s = round(r.index_time_s + r.match_time_s, 3)
@@ -393,9 +382,8 @@ SCANNERS = {
 
 
 def clear_clair_cache(images: list[dict], registry: str,
-                      clair_url: str, insecure: bool, clair_psk: str = ""):
+                      clair_url: str, clair_psk: str = ""):
     """Delete all index reports from Clair via bulk DELETE API."""
-    verify = not insecure
     auth = _clair_headers(clair_psk)
 
     # collect manifest digests by fetching from registry
@@ -413,7 +401,6 @@ def clear_clair_cache(images: list[dict], registry: str,
                     "application/vnd.oci.image.manifest.v1+json",
                     "application/vnd.docker.distribution.manifest.v2+json",
                 ])},
-                verify=verify,
             )
             digest = resp.headers.get("Docker-Content-Digest", "")
             if digest:
@@ -430,7 +417,6 @@ def clear_clair_cache(images: list[dict], registry: str,
             f"{clair_url}/indexer/api/v1/index_report",
             json=digests,
             headers={"Content-Type": "application/vnd.clair.bulk_delete.v1+json", **auth},
-            verify=verify,
         )
         if resp.status_code == 200:
             log.info(f"Clair cache cleared")
@@ -484,8 +470,6 @@ def parse_args() -> argparse.Namespace:
                    help="Docker container name for Clair indexer (for log parsing)")
     p.add_argument("--clair-psk", default="",
                    help="Base64-encoded PSK for Clair JWT auth (from clair config auth.psk.key)")
-    p.add_argument("--insecure", action="store_true",
-                   help="Skip TLS verification for registry and Clair")
     p.add_argument("--output", type=Path, default=Path("results.json"),
                    help="Output file for results (default: results.json)")
     p.add_argument("--cold", action="store_true",
@@ -517,13 +501,11 @@ def main():
             log.info("Clearing Trivy scan cache")
             subprocess.run(["trivy", "clean", "--scan-cache"], capture_output=True)
         if "clair" in args.scanners:
-            clear_clair_cache(images, registry, args.clair_url,
-                              args.insecure, args.clair_psk)
+            clear_clair_cache(images, registry, args.clair_url, args.clair_psk)
 
     results = run_all(
         images=images,
         scanners=args.scanners,
-        insecure=args.insecure,
         clair_url=args.clair_url,
         registry=registry,
         clair_indexer_container=args.clair_indexer_container,

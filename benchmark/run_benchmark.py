@@ -41,12 +41,13 @@ SEVERITY_MAP_CLAIR = {
     "Medium": "medium", "Low": "low", "Negligible": "low", "Unknown": "other",
 }
 
+###############################################################################
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
 
-def make_clair_jwt(psk: str, issuer: str = "clairctl", leeway: int = 60) -> str:
+def _make_clair_jwt(psk: str, issuer: str = "clairctl", leeway: int = 60) -> str:
     """Generate a JWT signed with Clair PSK (HS256), matching clairctl behavior."""
     key = base64.b64decode(psk)
     header = _b64url(json.dumps({"alg": "HS256"}, separators=(",", ":")).encode())
@@ -65,7 +66,7 @@ def make_clair_jwt(psk: str, issuer: str = "clairctl", leeway: int = 60) -> str:
 def _clair_headers(psk: str) -> dict:
     if not psk:
         return {}
-    return {"Authorization": f"Bearer {make_clair_jwt(psk)}"}
+    return {"Authorization": f"Bearer {_make_clair_jwt(psk)}"}
 
 
 def _registry_token(registry: str, repo: str) -> str:
@@ -132,6 +133,7 @@ def _registry_get(url: str, headers: dict = None,
     hdrs["Authorization"] = f"Bearer {new_token}"
     return requests.get(url, headers=hdrs)
 
+###############################################################################
 
 def empty_vulns() -> dict:
     return {"critical": 0, "high": 0, "medium": 0, "low": 0, "other": 0}
@@ -141,9 +143,9 @@ def empty_vulns() -> dict:
 class ScanResult:
     scanner: str
     image_ref: str
-    wall_time_s: float = 0.0
-    index_time_s: Optional[float] = None
-    match_time_s: Optional[float] = None
+    wall_time: float = 0.0
+    index_time: Optional[float] = None
+    match_time: Optional[float] = None
     vulns: dict = field(default_factory=empty_vulns)
     exit_code: int = 0
     error: str = ""
@@ -155,12 +157,10 @@ class ScanResult:
 
 def _parse_trivy_layer_digests(stderr: str) -> tuple[list[str], list[str]]:
     """Returns (missed_layers, all_layers) from Trivy --debug stderr."""
-    # old format: "Missing diff ID in cache: sha256:..."
-    # new format: "Missing diff ID in cache\tdiff_id=\"sha256:...\""
+    # Missing diff ID in cache\tdiff_id=\"sha256:...\"
     missed = re.findall(r"Missing diff ID in cache.*?(sha256:\w+)", stderr)
 
-    # old format: "Diff IDs: [sha256:... sha256:...]"
-    # new format: "Detected diff ID\tdiff_ids=[sha256:... sha256:...]"
+    # Detected diff ID\tdiff_ids=[sha256:... sha256:...]
     all_layers = []
     all_match = re.search(r"diff_ids?=\[([^\]]+)\]", stderr, re.IGNORECASE)
     if not all_match:
@@ -182,13 +182,12 @@ def run_trivy(image_ref: str, **_) -> ScanResult:
     wall = time.monotonic() - t0
 
     r = ScanResult(scanner="trivy", image_ref=image_ref,
-                   wall_time_s=round(wall, 3), exit_code=proc.returncode)
+                   wall_time=round(wall, 3), exit_code=proc.returncode)
 
     missed, all_layers = _parse_trivy_layer_digests(proc.stderr)
-    missed_set = set(missed)
     r.layers_fetched = missed
     r.layers_scanned = missed
-    r.layers_cached = [l for l in all_layers if l not in missed_set]
+    r.layers_cached = [l for l in all_layers if l not in missed]
 
     try:
         data = json.loads(proc.stdout)
@@ -216,7 +215,7 @@ def run_grype(image_ref: str, **_) -> ScanResult:
             ["syft", image_ref, "-o", f"json={sbom_path}"],
             capture_output=True, text=True,
         )
-        r.index_time_s = round(time.monotonic() - t0, 3)
+        r.index_time = round(time.monotonic() - t0, 3)
 
         if proc_syft.returncode != 0:
             r.error = f"syft failed: {proc_syft.stderr[:500]}"
@@ -229,9 +228,9 @@ def run_grype(image_ref: str, **_) -> ScanResult:
             ["grype", f"sbom:{sbom_path}", "-o", "json"],
             capture_output=True, text=True,
         )
-        r.match_time_s = round(time.monotonic() - t0, 3)
+        r.match_time = round(time.monotonic() - t0, 3)
 
-        r.wall_time_s = round(r.index_time_s + r.match_time_s, 3)
+        r.wall_time = round(r.index_time + r.match_time, 3)
         r.exit_code = proc_grype.returncode
 
         # syft/grype have no layer cache — every layer is fetched and scanned
@@ -326,7 +325,7 @@ def run_clair(image_ref: str, clair_url: str = "", registry: str = "",
             f"{clair_url}/indexer/api/v1/index_report",
             json=payload, headers=auth,
         )
-        r.index_time_s = round(time.monotonic() - t0, 3)
+        r.index_time = round(time.monotonic() - t0, 3)
         if resp.status_code not in (200, 201):
             r.error = f"index failed: {resp.status_code} {resp.text[:300]}"
             r.exit_code = 1
@@ -343,8 +342,8 @@ def run_clair(image_ref: str, clair_url: str = "", registry: str = "",
             f"{clair_url}/matcher/api/v1/vulnerability_report/{manifest_digest}",
             headers=auth,
         )
-        r.match_time_s = round(time.monotonic() - t0, 3)
-        r.wall_time_s = round(r.index_time_s + r.match_time_s, 3)
+        r.match_time = round(time.monotonic() - t0, 3)
+        r.wall_time = round(r.index_time + r.match_time, 3)
 
         if resp.status_code != 200:
             r.error = f"match failed: {resp.status_code} {resp.text[:300]}"
@@ -443,7 +442,7 @@ def run_all(images: list[dict], scanners: list[str], **kwargs) -> list[dict]:
             cached = len(r.layers_cached)
             fetched = len(r.layers_fetched)
             log.info(
-                f"  {r.wall_time_s:.1f}s  "
+                f"  {r.wall_time:.1f}s  "
                 f"vulns={sum(r.vulns.values())}  "
                 f"layers: {fetched} fetched, {cached} cached  "
                 f"exit={r.exit_code}"
@@ -527,7 +526,7 @@ def main():
 
     for scanner in args.scanners:
         sc = [r for r in results if r["scanner"] == scanner]
-        times = [r["wall_time_s"] for r in sc]
+        times = [r["wall_time"] for r in sc]
         vulns = sum(sum(r["vulns"].values()) for r in sc)
         errs = sum(1 for r in sc if r["error"])
         if times:

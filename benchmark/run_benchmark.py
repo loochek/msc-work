@@ -140,6 +140,23 @@ def empty_vulns() -> dict:
 
 
 @dataclass
+class EStargzLayerStat:
+    bytes_fetched: int
+    layer_size: int
+
+    @property
+    def fetch_ratio(self) -> float:
+        return self.bytes_fetched / self.layer_size if self.layer_size else 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "bytes_fetched": self.bytes_fetched,
+            "layer_size": self.layer_size,
+            "fetch_ratio": round(self.fetch_ratio, 4),
+        }
+
+
+@dataclass
 class ScanResult:
     scanner: str
     image_ref: str
@@ -152,6 +169,9 @@ class ScanResult:
     layers_fetched: list = field(default_factory=list)
     layers_scanned: list = field(default_factory=list)
     layers_cached: list = field(default_factory=list)
+
+    estargz_layers: dict = field(default_factory=dict)  # diff_id -> EStargzLayerStat
+    estargz_fallback_layers: list = field(default_factory=list)
 
 ###############################################################################
 
@@ -170,10 +190,37 @@ def _parse_trivy_layer_digests(stderr: str) -> tuple[list[str], list[str]]:
     return missed, all_layers
 
 
-def run_trivy(image_ref: str, **_) -> ScanResult:
+def _parse_estargz_layer_stats(stderr: str) -> tuple[dict[str, EStargzLayerStat], list[str]]:
+    """Parse per-layer eStargz fetch stats from Trivy --debug stderr.
+
+    Returns (layer_stats, fallback_diff_ids) where:
+    - layer_stats: diff_id -> EStargzLayerStat for layers scanned via lazy fetch
+    - fallback_diff_ids: diff IDs that fell back to full download
+    """
+    layer_stats: dict[str, EStargzLayerStat] = {}
+    for m in re.finditer(
+        r'eStargz layer scan\s+diff_id="(sha256:\w+)"\s+bytes_fetched=(\d+)\s+layer_size=(\d+)',
+        stderr,
+    ):
+        layer_stats[m.group(1)] = EStargzLayerStat(
+            bytes_fetched=int(m.group(2)),
+            layer_size=int(m.group(3)),
+        )
+    missed, _ = _parse_trivy_layer_digests(stderr)
+    fallback_diff_ids = [d for d in missed if d not in layer_stats]
+    return layer_stats, fallback_diff_ids
+
+
+def _run_trivy(
+    image_ref: str,
+    binary: str = "trivy",
+    scanner_name: str = "trivy",
+    extra_flags: list[str] | None = None
+) -> ScanResult:
     cmd = [
-        "trivy", "image", "--format", "json",
+        binary, "image", "--format", "json",
         "--debug", "--skip-db-update", "--skip-java-db-update",
+        *(extra_flags or []),
         image_ref,
     ]
 
@@ -181,13 +228,27 @@ def run_trivy(image_ref: str, **_) -> ScanResult:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     wall = time.monotonic() - t0
 
-    r = ScanResult(scanner="trivy", image_ref=image_ref,
+    r = ScanResult(scanner=scanner_name, image_ref=image_ref,
                    wall_time=round(wall, 3), exit_code=proc.returncode)
+
+    if proc.returncode != 0 and not proc.stdout.strip():
+        r.error = f"{scanner_name} failed (exit {proc.returncode}): {proc.stderr[:300]}"
+        return r
 
     missed, all_layers = _parse_trivy_layer_digests(proc.stderr)
     r.layers_fetched = missed
     r.layers_scanned = missed
     r.layers_cached = [l for l in all_layers if l not in missed]
+
+    if scanner_name == "trivy-estargz":
+        layer_stats, fallback_diff_ids = _parse_estargz_layer_stats(proc.stderr)
+        r.estargz_layers = {d: s.to_dict() for d, s in layer_stats.items()}
+        r.estargz_fallback_layers = fallback_diff_ids
+        if fallback_diff_ids:
+            r.error = (
+                f"estargz validation: {len(fallback_diff_ids)} layer(s) fell back to full "
+                f"download — image may not be eStargz-formatted: {fallback_diff_ids}"
+            )
 
     try:
         data = json.loads(proc.stdout)
@@ -196,9 +257,28 @@ def run_trivy(image_ref: str, **_) -> ScanResult:
                 sev = SEVERITY_MAP_TRIVY.get(v.get("Severity", "UNKNOWN"), "other")
                 r.vulns[sev] += 1
     except (json.JSONDecodeError, KeyError) as e:
-        r.error = f"parse error: {e}"
+        if not r.error:
+            r.error = f"parse error: {e}"
 
     return r
+
+
+def run_trivy(image_ref: str, **_) -> ScanResult:
+    return _run_trivy(image_ref)
+
+
+def run_trivy_estargz(image_ref: str, trivy_estargz_binary: str, estargz_tag_suffix: str, **_) -> ScanResult:
+    if ":" in image_ref.split("/")[-1]:
+        base, tag = image_ref.rsplit(":", 1)
+        estargz_ref = f"{base}:{tag}{estargz_tag_suffix}"
+    else:
+        estargz_ref = f"{image_ref}{estargz_tag_suffix}"
+    return _run_trivy(
+        estargz_ref,
+        binary=trivy_estargz_binary,
+        scanner_name="trivy-estargz",
+        extra_flags=["--estargz", "--scanners", "vuln"],
+    )
 
 ###############################################################################
 
@@ -375,6 +455,7 @@ def run_clair(image_ref: str, clair_url: str = "", registry: str = "",
 
 SCANNERS = {
     "trivy": run_trivy,
+    "trivy-estargz": run_trivy_estargz,
     "grype": run_grype,
     "clair": run_clair,
 }
@@ -441,10 +522,22 @@ def run_all(images: list[dict], scanners: list[str], **kwargs) -> list[dict]:
 
             cached = len(r.layers_cached)
             fetched = len(r.layers_fetched)
+            extra = ""
+            if r.estargz_layers:
+                total_fetched = sum(s["bytes_fetched"] for s in r.estargz_layers.values())
+                total_size = sum(s["layer_size"] for s in r.estargz_layers.values())
+                ratio = total_fetched / total_size if total_size else 0.0
+                fallbacks = len(r.estargz_fallback_layers)
+                extra = (
+                    f"  estargz: {total_fetched/1024:.0f}KB/{total_size/1024/1024:.1f}MB"
+                    f" ({ratio*100:.1f}%)"
+                    + (f"  FALLBACKS={fallbacks}" if fallbacks else "")
+                )
             log.info(
                 f"  {r.wall_time:.1f}s  "
                 f"vulns={sum(r.vulns.values())}  "
-                f"layers: {fetched} fetched, {cached} cached  "
+                f"layers: {fetched} fetched, {cached} cached"
+                f"{extra}  "
                 f"exit={r.exit_code}"
                 f"{'  ERR: ' + r.error if r.error else ''}"
             )
@@ -461,8 +554,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--manifest", type=Path, required=True,
                    help="Path to manifest.json from generate_images.py")
     p.add_argument("--scanners", nargs="+", default=["trivy", "grype", "clair"],
-                   choices=["trivy", "grype", "clair"],
-                   help="Scanners to benchmark (default: trivy grype)")
+                   choices=["trivy", "grype", "clair", "trivy-estargz"],
+                   help="Scanners to benchmark (default: trivy grype clair)")
     p.add_argument("--clair-url", default="localhost:6060",
                    help="Clair API base URL (required for --scanners clair)")
     p.add_argument("--clair-indexer-container", default="clair-indexer",
@@ -473,6 +566,10 @@ def parse_args() -> argparse.Namespace:
                    help="Output file for results (default: results.json)")
     p.add_argument("--cold", action="store_true",
                    help="Clear scanner caches before running (cold scan)")
+    p.add_argument("--trivy-estargz-binary", default="/tmp/trivy-estargz",
+                   help="Path to trivy binary with eStargz support (default: /tmp/trivy-estargz)")
+    p.add_argument("--estargz-tag-suffix", default="-estargz",
+                   help="Tag suffix appended to image refs for eStargz variants (default: -estargz)")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Verbose output")
     return p.parse_args()
@@ -496,7 +593,7 @@ def main():
         return
 
     if args.cold:
-        if "trivy" in args.scanners:
+        if "trivy" in args.scanners or "trivy-estargz" in args.scanners:
             log.info("Clearing Trivy scan cache")
             subprocess.run(["trivy", "clean", "--scan-cache"], capture_output=True)
         if "clair" in args.scanners:
@@ -509,6 +606,8 @@ def main():
         registry=registry,
         clair_indexer_container=args.clair_indexer_container,
         clair_psk=args.clair_psk,
+        trivy_estargz_binary=args.trivy_estargz_binary,
+        estargz_tag_suffix=args.estargz_tag_suffix,
     )
 
     output = {
@@ -529,12 +628,28 @@ def main():
         times = [r["wall_time"] for r in sc]
         vulns = sum(sum(r["vulns"].values()) for r in sc)
         errs = sum(1 for r in sc if r["error"])
-        if times:
-            log.info(
-                f"{scanner}: {len(sc)} images, "
-                f"total={sum(times):.1f}s, avg={sum(times)/len(times):.1f}s, "
-                f"vulns={vulns}, errors={errs}"
-            )
+        if not times:
+            continue
+
+        extra = ""
+        if scanner == "trivy-estargz":
+            all_layers = [l for r in sc for l in r.get("estargz_layers", [])]
+            if all_layers:
+                tb = sum(l["bytes_fetched"] for l in all_layers)
+                ts = sum(l["layer_size"] for l in all_layers)
+                ratio = tb / ts if ts else 0.0
+                fallbacks = sum(len(r.get("estargz_fallback_layers", [])) for r in sc)
+                extra = (
+                    f", bytes_fetched={tb/1024/1024:.1f}MB/{ts/1024/1024:.1f}MB"
+                    f" ({ratio*100:.2f}%)"
+                    + (f", fallbacks={fallbacks}" if fallbacks else "")
+                )
+
+        log.info(
+            f"{scanner}: {len(sc)} images, "
+            f"total={sum(times):.1f}s, avg={sum(times)/len(times):.1f}s, "
+            f"vulns={vulns}, errors={errs}{extra}"
+        )
 
 
 if __name__ == "__main__":

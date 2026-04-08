@@ -232,7 +232,7 @@ def _run_trivy(
                    wall_time=round(wall, 3), exit_code=proc.returncode)
 
     if proc.returncode != 0 and not proc.stdout.strip():
-        r.error = f"{scanner_name} failed (exit {proc.returncode}): {proc.stderr[:300]}"
+        r.error = f"{scanner_name} failed (exit {proc.returncode}): {proc.stderr[-500:].strip()}"
         return r
 
     missed, all_layers = _parse_trivy_layer_digests(proc.stderr)

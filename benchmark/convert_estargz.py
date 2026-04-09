@@ -37,11 +37,14 @@ def estargz_ref(ref: str, suffix: str) -> str:
 
 def convert_image(ref: str, suffix: str, user: str) -> bool:
     dst = estargz_ref(ref, suffix)
-    return (
+    ok = (
         run(["sudo", "ctr-remote", "images", "pull", ref])
         and run(["sudo", "ctr-remote", "images", "convert", "--estargz", "--oci", ref, dst])
         and run(["sudo", "ctr-remote", "images", "push", "--user", user, dst])
     )
+    run(["sudo", "ctr-remote", "images", "remove", ref])
+    run(["sudo", "ctr-remote", "images", "remove", dst])
+    return ok
 
 
 def parse_args() -> argparse.Namespace:

@@ -277,11 +277,7 @@ def run_trivy(image_ref: str, **_) -> ScanResult:
 
 
 def run_trivy_estargz(image_ref: str, trivy_estargz_binary: str, estargz_tag_suffix: str, **_) -> ScanResult:
-    if ":" in image_ref.split("/")[-1]:
-        base, tag = image_ref.rsplit(":", 1)
-        estargz_ref = f"{base}:{tag}{estargz_tag_suffix}"
-    else:
-        estargz_ref = f"{image_ref}{estargz_tag_suffix}"
+    estargz_ref = f"{image_ref}{estargz_tag_suffix}"
     return _run_trivy(
         estargz_ref,
         binary=trivy_estargz_binary,

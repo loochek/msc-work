@@ -29,9 +29,6 @@ def run(cmd: list[str]) -> bool:
 
 
 def estargz_ref(ref: str, suffix: str) -> str:
-    if ":" in ref.split("/")[-1]:
-        base, tag = ref.rsplit(":", 1)
-        return f"{base}:{tag}{suffix}"
     return f"{ref}{suffix}"
 
 

@@ -139,6 +139,15 @@ def empty_vulns() -> dict:
     return {"critical": 0, "high": 0, "medium": 0, "low": 0, "other": 0}
 
 
+def _fmt_bytes(n: int) -> str:
+    """Human-readable byte count: always shows at least 1 significant digit."""
+    if n < 1024:
+        return f"{n}B"
+    if n < 1024 * 1024:
+        return f"{n/1024:.1f}KB"
+    return f"{n/1024/1024:.2f}MB"
+
+
 @dataclass
 class EStargzLayerStat:
     bytes_fetched: int
@@ -529,7 +538,7 @@ def run_all(images: list[dict], scanners: list[str], **kwargs) -> list[dict]:
                 ratio = total_fetched / total_size if total_size else 0.0
                 fallbacks = len(r.estargz_fallback_layers)
                 extra = (
-                    f"  estargz: {total_fetched/1024:.0f}KB/{total_size/1024/1024:.1f}MB"
+                    f"  estargz: {_fmt_bytes(total_fetched)}/{_fmt_bytes(total_size)}"
                     f" ({ratio*100:.1f}%)"
                     + (f"  FALLBACKS={fallbacks}" if fallbacks else "")
                 )
@@ -633,14 +642,14 @@ def main():
 
         extra = ""
         if scanner == "trivy-estargz":
-            all_layers = [l for r in sc for l in r.get("estargz_layers", [])]
+            all_layers = [l for r in sc for l in r.get("estargz_layers", {}).values()]
             if all_layers:
                 tb = sum(l["bytes_fetched"] for l in all_layers)
                 ts = sum(l["layer_size"] for l in all_layers)
                 ratio = tb / ts if ts else 0.0
                 fallbacks = sum(len(r.get("estargz_fallback_layers", [])) for r in sc)
                 extra = (
-                    f", bytes_fetched={tb/1024/1024:.1f}MB/{ts/1024/1024:.1f}MB"
+                    f", bytes_fetched={_fmt_bytes(tb)}/{_fmt_bytes(ts)}"
                     f" ({ratio*100:.2f}%)"
                     + (f", fallbacks={fallbacks}" if fallbacks else "")
                 )

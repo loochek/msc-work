@@ -24,17 +24,19 @@ def fmt_vulns(v: dict) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--results", type=Path, required=True,
-                   help="results.json from run_benchmark.py")
+    p.add_argument("--results", type=Path, nargs="+", required=True,
+                   help="results.json files from run_benchmark.py (one or more)")
     p.add_argument("--suffix", default="-estargz",
                    help="Tag suffix used for eStargz images (default: -estargz)")
     args = p.parse_args()
 
-    data = json.loads(args.results.read_text())
+    rows = []
+    for path in args.results:
+        rows.extend(json.loads(path.read_text())["results"])
 
-    # Index: base_ref → scanner → row
+    # base_ref -> scanner -> row
     by_ref: dict[str, dict[str, dict]] = {}
-    for r in data["results"]:
+    for r in rows:
         if r.get("error"):
             continue
         scanner = r["scanner"]

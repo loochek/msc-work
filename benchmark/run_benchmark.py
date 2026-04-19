@@ -273,7 +273,7 @@ def _run_trivy(
 
 
 def run_trivy(image_ref: str, **_) -> ScanResult:
-    return _run_trivy(image_ref)
+    return _run_trivy(image_ref, extra_flags=["--scanners", "vuln"])
 
 
 def run_trivy_estargz(image_ref: str, trivy_estargz_binary: str, estargz_tag_suffix: str, **_) -> ScanResult:

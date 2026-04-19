@@ -24,7 +24,7 @@ def fmt_vulns(v: dict) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--results", type=Path, nargs="+", required=True,
+    p.add_argument("--results", type=Path, action="append", required=True,
                    help="results.json files from run_benchmark.py (one or more)")
     p.add_argument("--suffix", default="-estargz",
                    help="Tag suffix used for eStargz images (default: -estargz)")

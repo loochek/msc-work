@@ -115,7 +115,7 @@ def _estargz_triples(results, suffix="-estargz") -> dict[str, list[tuple[int, in
         if r["scanner"] != "trivy-estargz" or r.get("error") or not r.get("estargz_layers"):
             continue
         fetched = sum(l["bytes_fetched"] for l in r["estargz_layers"].values())
-        estargz = sum(l["layer_size"]    for l in r["estargz_layers"].values())
+        estargz = r.get("manifest_layer_size") or sum(l["layer_size"] for l in r["estargz_layers"].values())
         base_ref = r["image_ref"][:-len(suffix)] if r["image_ref"].endswith(suffix) else r["image_ref"]
         orig = original_size.get(base_ref, 0)
         if estargz > 0:

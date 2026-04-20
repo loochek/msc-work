@@ -143,10 +143,10 @@ def plot_fetch_ratio(ax, results):
         ratio_o.append(avg_f / avg_o * 100 if avg_o else 0.0)
 
     bars1 = ax.bar(x - width / 2, ratio_e, width,
-                   label="fetched / estargz total",
+                   label="fetched data size / estargz image size",
                    color=ESTARGZ_COLORS["fetched"], alpha=0.88)
     bars2 = ax.bar(x + width / 2, ratio_o, width,
-                   label="fetched / original size",
+                   label="fetched data size / original image size",
                    color=ESTARGZ_COLORS["original"], alpha=0.88)
 
     bar_labels(ax, bars1, "{:.0f}%")
@@ -157,7 +157,7 @@ def plot_fetch_ratio(ax, results):
     ax.set_ylim(0, 115)
     ax.axhline(100, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
     ax.set_ylabel("Fetch ratio (%)")
-    ax.set_title("estargz: fetch ratio by base image type")
+    ax.set_title("trivy-estargz: fetch ratio by base image type")
     ax.legend(fontsize=8)
     ax.grid(axis="y", alpha=0.3)
 
@@ -167,7 +167,7 @@ def plot_fetch_ratio(ax, results):
 def plot_image_size(ax, results):
     """
         - estargz fetched
-        - estargz total layer size
+        - estargz total image size
         - original image size
     """
     MB = 1024 ** 2
@@ -183,11 +183,11 @@ def plot_image_size(ax, results):
         original_mb.append(float(np.mean([t[2] for t in ts])) / MB)
 
     bars1 = ax.bar(x - width, fetched_mb, width,
-                   label="estargz fetched",  color=ESTARGZ_COLORS["fetched"],  alpha=0.88)
+                   label="estargz fetched data size",  color=ESTARGZ_COLORS["fetched"],  alpha=0.88)
     bars2 = ax.bar(x,         estargz_mb, width,
-                   label="estargz total",    color=ESTARGZ_COLORS["estargz"],  alpha=0.88)
+                   label="estargz image size",    color=ESTARGZ_COLORS["estargz"],  alpha=0.88)
     bars3 = ax.bar(x + width, original_mb, width,
-                   label="Original size",    color=ESTARGZ_COLORS["original"], alpha=0.88)
+                   label="original image size",    color=ESTARGZ_COLORS["original"], alpha=0.88)
 
     for bars in (bars1, bars2, bars3):
         bar_labels(ax, bars, "{:.0f}")
@@ -195,7 +195,7 @@ def plot_image_size(ax, results):
     ax.set_xticks(x)
     ax.set_xticklabels(BASE_ORDER)
     ax.set_ylabel("Avg data size (MB)")
-    ax.set_title("estargz: data size by base image type")
+    ax.set_title("trivy-estargz: fetched data size by base image type")
     ax.legend(fontsize=8)
     ax.grid(axis="y", alpha=0.3)
 
@@ -218,7 +218,7 @@ def plot_time_to_image_size(ax, results):
         if b not in handles:
             handles[b] = sc
 
-    ax.set_xlabel("Data fetched (MB)")
+    ax.set_xlabel("Fetched data size (MB)")
     ax.set_ylabel("Wall time (s)")
     ax.set_title("trivy-estargz: time to image size")
     ax.legend(

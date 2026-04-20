@@ -135,6 +135,36 @@ def _registry_get(url: str, headers: dict = None,
 
 ###############################################################################
 
+def _manifest_layer_size(image_ref: str) -> Optional[int]:
+    """Return total compressed layer size (bytes) from the registry manifest."""
+
+    if ":" in image_ref.split("/")[-1]:
+        repo_part, tag = image_ref.rsplit(":", 1)
+    else:
+        repo_part, tag = image_ref, "latest"
+
+    parts = repo_part.split("/", 1)
+    if len(parts) != 2:
+        return None
+    registry, repo = parts[0], parts[1]
+
+    try:
+        token = _registry_token(registry, repo)
+        resp = _registry_get(
+            f"https://{registry}/v2/{repo}/manifests/{tag}",
+            headers={"Accept": ", ".join([
+                "application/vnd.oci.image.manifest.v1+json",
+                "application/vnd.docker.distribution.manifest.v2+json",
+            ])},
+            token=token,
+        )
+        resp.raise_for_status()
+        manifest = resp.json()
+        return sum(layer.get("size", 0) for layer in manifest.get("layers", []))
+    except Exception:
+        return None
+
+
 def empty_vulns() -> dict:
     return {"critical": 0, "high": 0, "medium": 0, "low": 0, "other": 0}
 
@@ -181,6 +211,8 @@ class ScanResult:
 
     estargz_layers: dict = field(default_factory=dict)  # diff_id -> EStargzLayerStat
     estargz_fallback_layers: list = field(default_factory=list)
+
+    manifest_layer_size: Optional[int] = None
 
 ###############################################################################
 
@@ -269,6 +301,7 @@ def _run_trivy(
         if not r.error:
             r.error = f"parse error: {e}"
 
+    r.manifest_layer_size = _manifest_layer_size(image_ref)
     return r
 
 

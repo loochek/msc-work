@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+
+"""
+Test image set generator for vulnerability scanner benchmarks
+"""
+
+import argparse
+import json
+import logging
+import random
+import subprocess
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Optional
+
+log = logging.getLogger(__name__)
+
+###############################################################################
+
+@dataclass
+class BaseImage:
+    image: str                      # e.g. "ubuntu:22.04"
+    name: str                       # short name for tags, e.g. "ubuntu"
+    pkg_manager: str                # apt | apk | dnf
+    allowed_derivative_types: list  # pip | npm | go
+
+
+@dataclass
+class ImageSpec:
+    """
+    Specification of a single image to build
+    """
+
+    base: BaseImage
+    name: str                    # image name (without registry prefix)
+    tag: str
+    derivative_type: str         # os-deps | pip | npm | go
+    os_packages: list
+    pip_packages: list
+    npm_packages: list
+    go_modules: list             # list of (module_path, import_path, version)
+    version: int = 1
+
+
+@dataclass
+class BuiltImage:
+    """
+    Build result stored in manifest.json
+    """
+
+    ref: str
+    base_image: str
+    derivative_type: str
+    version: int
+    layers: list
+    size_bytes: int = 0
+
+###############################################################################
+
+APT_PACKAGES = [
+    "curl", "wget", "vim-tiny", "git", "build-essential", "libssl-dev",
+    "nginx-light", "postgresql-client", "redis-tools", "jq", "htop",
+    "strace", "tcpdump", "net-tools", "dnsutils", "ca-certificates",
+    "openssh-client", "rsync", "unzip", "file", "less", "procps",
+    "libpq-dev", "libffi-dev", "libxml2-dev", "libxslt1-dev",
+]
+
+APK_PACKAGES = [
+    "curl", "git", "openssh", "nginx", "python3", "py3-pip", "nodejs",
+    "npm", "jq", "htop", "strace", "tcpdump", "bind-tools", "ca-certificates",
+    "rsync", "unzip", "file", "less", "procps", "build-base",
+    "libffi-dev", "openssl-dev", "musl-dev",
+]
+
+DNF_PACKAGES = [
+    "curl", "wget", "vim-minimal", "git", "gcc", "gcc-c++", "make",
+    "openssl-devel", "nginx", "postgresql", "redis", "jq", "htop",
+    "strace", "tcpdump", "net-tools", "bind-utils", "ca-certificates",
+    "openssh-clients", "rsync", "unzip", "file", "less", "procps-ng",
+    "libffi-devel", "libxml2-devel",
+]
+
+PIP_PACKAGES = [
+    "requests==2.31.0", "flask==3.0.0", "django==4.2.7",
+    "numpy==1.26.2", "pandas==2.1.3", "boto3==1.29.7",
+    "celery==5.3.6", "redis==5.0.1", "psycopg2-binary==2.9.9",
+    "sqlalchemy==2.0.23", "pydantic==2.5.2", "httpx==0.25.2",
+    "gunicorn==21.2.0", "pillow==10.1.0", "cryptography==41.0.7",
+    "paramiko==3.4.0", "jinja2==3.1.2", "pyyaml==6.0.1",
+    "marshmallow==3.20.1", "click==8.1.7",
+]
+
+NPM_PACKAGES = [
+    "express@4.18.2", "lodash@4.17.21", "axios@1.6.2",
+    "moment@2.29.4", "webpack@5.89.0", "typescript@5.3.2",
+    "react@18.3.1", "react-dom@18.3.1", "next@14.0.3",
+    "dotenv@16.3.1", "winston@3.11.0", "uuid@9.0.0",
+    "cors@2.8.5", "jsonwebtoken@9.0.2", "bcryptjs@2.4.3",
+    "mongoose@8.0.2", "sequelize@6.35.1", "pg@8.11.3",
+    "redis@4.6.11", "ioredis@5.3.2",
+]
+
+# (module path for go.mod, import path for source, version)
+GO_MODULES = [
+    ("github.com/gin-gonic/gin",             "github.com/gin-gonic/gin",                        "v1.9.1"),
+    ("github.com/spf13/cobra",               "github.com/spf13/cobra",                          "v1.8.0"),
+    ("github.com/spf13/viper",               "github.com/spf13/viper",                          "v1.18.1"),
+    ("go.uber.org/zap",                       "go.uber.org/zap",                                "v1.26.0"),
+    ("gorm.io/gorm",                          "gorm.io/gorm",                                   "v1.25.5"),
+    ("gorm.io/driver/postgres",               "gorm.io/driver/postgres",                        "v1.5.4"),
+    ("github.com/go-redis/redis/v8",          "github.com/go-redis/redis/v8",                   "v8.11.5"),
+    ("github.com/gorilla/mux",                "github.com/gorilla/mux",                         "v1.8.1"),
+    ("github.com/prometheus/client_golang",   "github.com/prometheus/client_golang/prometheus", "v1.17.0"),
+    ("google.golang.org/grpc",                "google.golang.org/grpc",                         "v1.60.0"),
+]
+
+BASE_IMAGES = [
+    BaseImage("ubuntu:22.04", "ubuntu", "apt", ["os-deps"]),
+    BaseImage("alpine:3.18", "alpine", "apk", ["os-deps"]),
+    BaseImage("fedora:39", "fedora", "dnf", ["os-deps"]),
+    BaseImage("python:3.11-slim", "python", "apt", ["pip"]),
+    BaseImage("node:20-slim", "node", "apt", ["npm"]),
+    BaseImage("golang:1.23", "golang", "apt", ["go"]),
+]
+
+###############################################################################
+
+def generate_image_matrix(
+    derivatives_per_base: int,
+    versions_per_derivative: int,
+    seed: int,
+) -> list[ImageSpec]:
+    rng = random.Random(seed)
+    specs = []
+
+    for base in BASE_IMAGES:
+        available_types = base.allowed_derivative_types
+
+        for d in range(derivatives_per_base):
+            derivative_type = available_types[d % len(available_types)]
+
+            pkg_pool = {
+                "apt": APT_PACKAGES,
+                "apk": APK_PACKAGES,
+                "dnf": DNF_PACKAGES,
+            }[base.pkg_manager]
+            os_pkgs = sorted(rng.sample(pkg_pool, k=rng.randint(3, 8)))
+
+            pip_pkgs = []
+            npm_pkgs = []
+            go_mods = {}
+
+            if derivative_type == "pip":
+                pip_pkgs = sorted(rng.sample(PIP_PACKAGES, k=rng.randint(4, 10)))
+            elif derivative_type == "npm":
+                npm_pkgs = sorted(rng.sample(NPM_PACKAGES, k=rng.randint(4, 10)))
+            elif derivative_type == "go":
+                go_mods = rng.sample(GO_MODULES, k=rng.randint(3, 6))
+                os_pkgs = []  # will be ignored
+
+            name = f"bench/{base.name}-{derivative_type}-{d:03d}"
+
+            for v in range(1, versions_per_derivative + 1):
+                specs.append(ImageSpec(
+                    base=base,
+                    name=name,
+                    tag=f"v{v}",
+                    derivative_type=derivative_type,
+                    os_packages=os_pkgs,
+                    pip_packages=pip_pkgs,
+                    npm_packages=npm_pkgs,
+                    go_modules=go_mods,
+                    version=v,
+                ))
+
+    return specs
+
+###############################################################################
+
+def make_install_cmd(pkg_manager: str, packages: list[str]) -> str:
+    if not packages:
+        return ""
+    pkgs = " ".join(packages)
+    if pkg_manager == "apt":
+        return f"RUN apt-get update && apt-get install -y --no-install-recommends {pkgs} && rm -rf /var/lib/apt/lists/*"
+    elif pkg_manager == "apk":
+        return f"RUN apk add --no-cache {pkgs}"
+    elif pkg_manager == "dnf":
+        return f"RUN dnf install -y {pkgs} && dnf clean all"
+    return ""
+
+
+def generate_dockerfile(spec: ImageSpec) -> str:
+    if spec.go_modules:
+        return _generate_dockerfile_go(spec)
+
+    lines = [f"FROM {spec.base.image}"]
+
+    if spec.os_packages:
+        lines.append(make_install_cmd(spec.base.pkg_manager, spec.os_packages))
+
+    if spec.pip_packages:
+        lines.append("COPY requirements.txt /tmp/requirements.txt")
+        lines.append("RUN pip install --no-cache-dir -r /tmp/requirements.txt")
+
+    if spec.npm_packages:
+        lines.append("WORKDIR /app")
+        lines.append("COPY package.json /app/package.json")
+        lines.append("RUN npm install --omit=dev --legacy-peer-deps")
+
+    lines.append("COPY src/ /app/src/")
+
+    if spec.pip_packages:
+        lines.append('CMD ["python", "/app/src/app.py"]')
+    elif spec.npm_packages:
+        lines.append('CMD ["node", "/app/src/index.js"]')
+    else:
+        lines.append('CMD ["sh", "/app/src/run.sh"]')
+
+    return "\n".join(lines)
+
+
+def _generate_dockerfile_go(spec: ImageSpec) -> str:
+    lines = [f"FROM {spec.base.image} AS builder"]
+    lines.append("WORKDIR /build")
+    lines.append("COPY go.mod /build/")
+    lines.append("COPY main.go /build/")
+    lines.append("RUN go mod tidy")
+    lines.append("RUN CGO_ENABLED=0 go build -o /server .")
+    lines.append("")
+    lines.append("FROM scratch")
+    lines.append("COPY --from=builder /server /server")
+    lines.append('ENTRYPOINT ["/server"]')
+    return "\n".join(lines)
+
+
+def generate_go_files(spec: ImageSpec) -> tuple[str, str]:
+    """Return (go.mod, main.go) content."""
+    require_lines = [f"\t{mod} {ver}" for mod, _, ver in spec.go_modules]
+
+    go_mod = f"""module benchmark/app
+
+go 1.23
+
+require (
+{chr(10).join(require_lines)}
+)
+"""
+    imports = [f'\t_ "{imp}"' for _, imp, _ in spec.go_modules]
+    spec_json = _spec_to_json(spec).replace('"', '\\"').replace('\n', '\\n')
+
+    main_go = f"""package main
+
+import (
+\t"fmt"
+{chr(10).join(imports)}
+)
+
+var spec = "{spec_json}"
+
+func main() {{
+\tfmt.Println(spec)
+}}
+"""
+    return go_mod, main_go
+
+
+def write_build_context(spec: ImageSpec, build_dir: Path):
+    """
+    Write Dockerfile and supporting files into build_dir
+    """
+
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    (build_dir / "Dockerfile").write_text(generate_dockerfile(spec))
+
+    if spec.pip_packages:
+        (build_dir / "requirements.txt").write_text(
+            "\n".join(spec.pip_packages) + "\n"
+        )
+
+    if spec.npm_packages:
+        pkg_json = {
+            "name": "benchmark-app",
+            "version": f"1.0.{spec.version}",
+            "dependencies": {},
+        }
+        for pkg in spec.npm_packages:
+            if "@" in pkg and not pkg.startswith("@"):
+                name, ver = pkg.rsplit("@", 1)
+                pkg_json["dependencies"][name] = ver
+            else:
+                pkg_json["dependencies"][pkg] = "*"
+        (build_dir / "package.json").write_text(
+            json.dumps(pkg_json, indent=2) + "\n"
+        )
+
+    if spec.go_modules:
+        go_mod, main_go = generate_go_files(spec)
+        (build_dir / "go.mod").write_text(go_mod)
+        (build_dir / "main.go").write_text(main_go)
+    else:
+        _write_src_dir(spec, build_dir)
+
+
+def _spec_to_json(spec: ImageSpec) -> str:
+    return json.dumps({
+        "name": spec.name,
+        "tag": spec.tag,
+        "base": spec.base.image,
+        "derivative_type": spec.derivative_type,
+        "version": spec.version,
+        "os_packages": spec.os_packages,
+        "pip_packages": spec.pip_packages,
+        "npm_packages": spec.npm_packages,
+        "go_modules": {mod: ver for mod, _, ver in spec.go_modules},
+    }, indent=2)
+
+
+def _write_src_dir(spec: ImageSpec, build_dir: Path):
+    """
+    Generate version-specific source files for the src layer
+    """
+
+    src_dir = build_dir / "src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+
+    spec_json = _spec_to_json(spec)
+
+    if spec.pip_packages:
+        (src_dir / "app.py").write_text(
+            f"import json\n\n"
+            f"SPEC = json.loads('''\n{spec_json}\n''')\n\n"
+            f"if __name__ == \"__main__\":\n"
+            f"    print(json.dumps(SPEC, indent=2))\n"
+        )
+    elif spec.npm_packages:
+        (src_dir / "index.js").write_text(
+            f"const SPEC = {spec_json};\n\n"
+            f"console.log(JSON.stringify(SPEC, null, 2));\n"
+        )
+    else:
+        (src_dir / "spec.json").write_text(spec_json + "\n")
+        (src_dir / "run.sh").write_text(
+            f"#!/bin/sh\n"
+            f"cat /app/src/spec.json\n"
+        )
+
+
+def docker_build(spec: ImageSpec, registry: str, build_dir: Path) -> Optional[str]:
+    """
+    Build an image, return full image ref or None on failure
+    """
+
+    ref = f"{registry}/{spec.name}:{spec.tag}" if registry else f"{spec.name}:{spec.tag}"
+
+    write_build_context(spec, build_dir)
+
+    log.info(f"Building {ref}")
+    result = subprocess.run(
+        ["docker", "build", "-t", ref, "."],
+        cwd=build_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log.error(f"Build failed for {ref}:\n{result.stderr}")
+        return None
+    return ref
+
+
+def docker_push(ref: str) -> bool:
+    log.info(f"Pushing {ref}")
+    result = subprocess.run(
+        ["docker", "push", ref],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log.error(f"Push failed for {ref}:\n{result.stderr}")
+        return False
+    return True
+
+
+def docker_inspect(ref: str) -> Optional[dict]:
+    result = subprocess.run(
+        ["docker", "inspect", ref],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    data = json.loads(result.stdout)
+    if not data:
+        return None
+    return data[0]
+
+
+def collect_image_info(ref: str, spec: ImageSpec) -> BuiltImage:
+    info = docker_inspect(ref)
+    layers = []
+    size = 0
+    if info:
+        layers = info.get("RootFS", {}).get("Layers", [])
+        size = info.get("Size", 0)
+
+    return BuiltImage(
+        ref=ref,
+        base_image=spec.base.image,
+        derivative_type=spec.derivative_type,
+        version=spec.version,
+        layers=layers,
+        size_bytes=size,
+    )
+
+
+###############################################################################
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Generate a test set of OCI images for vulnerability scanner benchmarks"
+    )
+    p.add_argument(
+        "--registry", default="",
+        help="Registry address (e.g. localhost:5000). Empty = local Docker only"
+    )
+    p.add_argument(
+        "--derivatives-per-base", type=int, default=5,
+        help="Number of derivative images per base image (default: 5)"
+    )
+    p.add_argument(
+        "--versions-per-derivative", type=int, default=3,
+        help="Number of versions (different app layer) per derivative (default: 3)"
+    )
+    p.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for reproducibility (default: 42)"
+    )
+    p.add_argument(
+        "--push", action="store_true",
+        help="Push images to the registry after building"
+    )
+    p.add_argument(
+        "--dry-run", action="store_true",
+        help="Only print the build plan, do not build anything"
+    )
+    p.add_argument(
+        "--build-dir", type=Path, default=Path("images"),
+        help="Directory for Dockerfiles and build contexts (default: images/)"
+    )
+    p.add_argument(
+        "--output-manifest", type=Path, default=Path("manifest.json"),
+        help="Path to save the image manifest (default: manifest.json)"
+    )
+    p.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Verbose output"
+    )
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+    specs = generate_image_matrix(
+        derivatives_per_base=args.derivatives_per_base,
+        versions_per_derivative=args.versions_per_derivative,
+        seed=args.seed,
+    )
+
+    unique_derivatives = {s.name for s in specs}
+
+    log.info(
+        f"Matrix: {len(BASE_IMAGES)} bases x {args.derivatives_per_base} derivatives "
+        f"x {args.versions_per_derivative} versions = {len(specs)} images "
+        f"({len(unique_derivatives)} unique derivatives)"
+    )
+
+    if args.dry_run:
+        print(f"\n{'='*70}")
+        print(f"DRY RUN: {len(specs)} images to build")
+        print(f"{'='*70}\n")
+        for spec in specs:
+            ref = f"{args.registry}/{spec.name}:{spec.tag}" if args.registry else f"{spec.name}:{spec.tag}"
+            pkg_info = []
+            if spec.os_packages:
+                pkg_info.append(f"{len(spec.os_packages)} os-pkgs")
+            if spec.pip_packages:
+                pkg_info.append(f"{len(spec.pip_packages)} pip")
+            if spec.npm_packages:
+                pkg_info.append(f"{len(spec.npm_packages)} npm")
+            if spec.go_modules:
+                pkg_info.append(f"{len(spec.go_modules)} go-mods")
+            print(f"  {ref:55s}  [{', '.join(pkg_info)}]")
+        return
+
+    built: list[BuiltImage] = []
+    failed = 0
+
+    for i, spec in enumerate(specs):
+        log.info(f"[{i+1}/{len(specs)}] {spec.name}:{spec.tag}")
+
+        build_dir = args.build_dir / f"{spec.name.replace('/', '_')}_{spec.tag}"
+        ref = docker_build(spec, args.registry, build_dir)
+        if ref is None:
+            failed += 1
+            continue
+
+        if args.push:
+            if not docker_push(ref):
+                failed += 1
+                continue
+
+        img = collect_image_info(ref, spec)
+        built.append(img)
+
+    # Manifest
+    manifest = {
+        "params": {
+            "registry": args.registry,
+            "derivatives_per_base": args.derivatives_per_base,
+            "versions_per_derivative": args.versions_per_derivative,
+            "seed": args.seed,
+        },
+        "images": [asdict(img) for img in built],
+    }
+
+    args.output_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+    log.info(f"Manifest saved to {args.output_manifest}")
+
+    all_layers = set()
+    total_size = 0
+    for img in built:
+        all_layers.update(img.layers)
+        total_size += img.size_bytes
+
+    print(f"\n{'='*50}")
+    print(f"Built:   {len(built)} images ({failed} failed)")
+    print(f"Layers:  {sum(len(img.layers) for img in built)} total, {len(all_layers)} unique")
+    print(f"Size:    {total_size / 1024**3:.1f} GB (sum, including shared layers)")
+    print(f"{'='*50}")
+
+
+if __name__ == "__main__":
+    main()

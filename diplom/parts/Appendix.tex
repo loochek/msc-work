@@ -1,0 +1,206 @@
+\addcontentsline{toc}{section}{Приложение}
+\label{sec:Apendix} \index{Apendix}
+
+\center{\textbf{Приложение 1. Пример eStargz-обхода слоя через TOC}}
+
+\flushleft
+\noindent Ниже приведена ключевая функция \texttt{WalkEStargz} из разработанного прототипа. Она читает TOC из конца блоба, затем для каждой записи проверяет применимость фильтра анализаторов и при необходимости скачивает содержимое файла.
+
+\lstset{
+  frame=tb,
+}
+\label{app:Apendix1}
+\begin{lstlisting}
+func WalkEStargz(
+    sr *io.SectionReader,
+    required func(string, os.FileInfo) bool,
+    fn WalkFunc,
+) error {
+    jtoc, err := readTOC(sr)
+    if err != nil {
+        return err
+    }
+
+    r, err := estargz.Open(sr,
+        estargz.WithDecompressors(new(estargz.GzipDecompressor)))
+    if err != nil {
+        return err
+    }
+
+    seen := make(map[string]bool, len(jtoc.Entries))
+    for _, ent := range jtoc.Entries {
+        if ent.Type != "reg" || seen[ent.Name] {
+            continue
+        }
+        seen[ent.Name] = true
+
+        info := &tocFileInfo{e: ent}
+        if !required(ent.Name, info) {
+            continue
+        }
+
+        fileSR, err := r.OpenFile(ent.Name)
+        if err != nil {
+            continue
+        }
+
+        data := make([]byte, ent.Size)
+        n, readErr := fileSR.ReadAt(data, 0)
+        data = data[:n]
+        if readErr != nil && readErr != io.EOF {
+            continue
+        }
+
+        if err := fn(ent.Name, info,
+            func() (xio.ReadSeekCloserAt, error) {
+                return xio.NopCloser(bytes.NewReader(data)), nil
+            }); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+\end{lstlisting}
+
+\newpage
+
+\center{\textbf{Приложение 2. HTTP Range-reader для запроса блобов из registry}}
+
+\flushleft
+\noindent Тип \texttt{httpRangeReader} реализует интерфейс \texttt{io.ReaderAt} поверх HTTP Range-запросов к registry с поддержкой bearer-аутентификации.
+
+\lstset{
+  frame=tb,
+}
+\begin{lstlisting}
+func (r *httpRangeReader) doRead(p []byte, off int64, retry bool) (int, error) {
+    req, err := http.NewRequest(http.MethodGet, r.url, nil)
+    if err != nil {
+        return 0, err
+    }
+    end := off + int64(len(p)) - 1
+    req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, end))
+
+    r.mu.Lock()
+    tok := r.token
+    r.mu.Unlock()
+    if tok != "" {
+        req.Header.Set("Authorization", "Bearer "+tok)
+    }
+
+    resp, err := r.client.Do(req)
+    if err != nil {
+        return 0, err
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode == http.StatusUnauthorized && retry {
+        newTok, err := r.negotiateToken(resp)
+        if err != nil {
+            return 0, err
+        }
+        r.mu.Lock()
+        r.token = newTok
+        r.mu.Unlock()
+        return r.doRead(p, off, false)
+    }
+
+    if resp.StatusCode != http.StatusPartialContent &&
+       resp.StatusCode != http.StatusOK {
+        return 0, fmt.Errorf("unexpected HTTP %d", resp.StatusCode)
+    }
+
+    n, err := io.ReadFull(resp.Body, p)
+    r.fetched.Add(int64(n))
+    return n, err
+}
+\end{lstlisting}
+
+\newpage
+
+\center{\textbf{Приложение 3. Пример вызова trivy-estargz}}
+
+\flushleft
+\noindent Пример сканирования eStargz-образа из Harbor с использованием разработанного прототипа:
+
+\begin{lstlisting}
+$ trivy-estargz image --estargz \
+    harbor.example.com/bench/ubuntu-os-deps-000:v1-estargz
+
+2024-05-11T19:00:00Z DEBUG eStargz layer scan
+  diff_id="sha256:abcd..."
+  bytes_fetched=782341
+  layer_size=24578120
+
+2024-05-11T19:00:01Z DEBUG eStargz layer scan
+  diff_id="sha256:efgh..."
+  bytes_fetched=1245678
+  layer_size=78234112
+
+Total: 18 vulnerabilities found
+  - CRITICAL: 1
+  - HIGH:     5
+  - MEDIUM:   8
+  - LOW:      4
+\end{lstlisting}
+
+\newpage
+
+\center{\textbf{Приложение 4. Команды для подготовки и запуска бенчмарка}}
+
+\flushleft
+\noindent Ниже приведена последовательность команд для запуска полного цикла бенчмарка~--- от генерации тестового набора до построения графиков.
+
+\begin{lstlisting}
+# 1. Генерация и загрузка тестового набора в Harbor
+python3 ./benchmark/generate_images.py \
+    --registry harbor.example.com \
+    --derivatives-per-base 5 \
+    --versions-per-derivative 3 \
+    --push
+
+# 2. Конвертация образов в eStargz и загрузка
+python3 ./benchmark/convert_estargz.py \
+    --manifest manifest.json \
+    --user admin:Harbor12345
+
+# 3. Подготовка баз уязвимостей
+trivy image --download-db-only
+grype db update
+
+# 4. Запуск сканеров в режиме холодного старта
+python3 ./benchmark/run_benchmark.py \
+    --manifest manifest.json \
+    --scanners trivy --cold \
+    --output results-trivy.json
+
+python3 ./benchmark/run_benchmark.py \
+    --manifest manifest.json \
+    --scanners trivy-estargz --cold \
+    --output results-trivy-estargz.json
+
+python3 ./benchmark/run_benchmark.py \
+    --manifest manifest.json \
+    --scanners grype \
+    --output results-grype.json
+
+python3 ./benchmark/run_benchmark.py \
+    --manifest manifest.json \
+    --scanners clair \
+    --clair-url 'http://localhost:6060' \
+    --clair-psk c2VjcmV0 --cold \
+    --output results-clair.json
+
+# 5. Верификация корректности результатов
+python3 ./benchmark/compare_trivy.py \
+    --results results-trivy.json \
+    --results results-trivy-estargz.json
+
+# 6. Построение графиков
+python3 ./benchmark/analyze.py \
+    --results results-trivy.json \
+    --results results-grype.json \
+    --results results-clair.json \
+    --results results-trivy-estargz.json \
+    --outdir charts/
+\end{lstlisting}

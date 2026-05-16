@@ -1,42 +1,18 @@
-@misc{ociimagespec,
-  title        = {OCI Image Format Specification},
+@misc{oci,
+  title        = {Open Container Initiative Specifications},
   author       = {{Open Container Initiative}},
-  year         = {2024},
-  howpublished = {\url{https://github.com/opencontainers/image-spec}}
-}
-
-@misc{ocidistspec,
-  title        = {OCI Distribution Specification},
-  author       = {{Open Container Initiative}},
-  year         = {2024},
-  howpublished = {\url{https://github.com/opencontainers/distribution-spec}}
-}
-
-@misc{ociruntimespec,
-  title        = {OCI Runtime Specification},
-  author       = {{Open Container Initiative}},
-  year         = {2024},
-  howpublished = {\url{https://github.com/opencontainers/runtime-spec}}
+  howpublished = {\url{https://opencontainers.org/}}
 }
 
 @misc{estargzspec,
-  title        = {eStargz: Standard-Compatible Extensions to Tar.gz Layers for Lazy Pulling Container Images},
-  author       = {Tokunaga, Kohei and {others}},
-  year         = {2024},
+  title        = {eStargz: Standard-Compatible Extension to Container Image Layers for Lazy Pulling},
+  author       = {containerd},
   howpublished = {\url{https://github.com/containerd/stargz-snapshotter/blob/main/docs/estargz.md}}
-}
-
-@misc{stargzsnapshotter,
-  title        = {Stargz Snapshotter: Fast container image distribution plugin with lazy pulling},
-  author       = {{containerd project}},
-  year         = {2024},
-  howpublished = {\url{https://github.com/containerd/stargz-snapshotter}}
 }
 
 @misc{crfs,
   title        = {CRFS: Container Registry Filesystem},
   author       = {Fitzpatrick, Brad},
-  year         = {2019},
   howpublished = {\url{https://github.com/google/crfs}}
 }
 
@@ -49,108 +25,80 @@
   year      = {2016}
 }
 
-@inproceedings{li2020dadi,
-  title     = {{DADI}: Block-Level Image Service for Agile and Elastic Application Deployment},
-  author    = {Li, Huiba and Yuan, Yifan and Du, Rui and Ma, Kai and Liu, Lanyue and Hsu, Windsor},
-  booktitle = {2020 USENIX Annual Technical Conference (USENIX ATC'20)},
-  pages     = {727--740},
-  year      = {2020}
-}
-
 @misc{nydus,
   title        = {Nydus: Dragonfly Container Image Service},
   author       = {{Dragonfly project}},
-  year         = {2024},
   howpublished = {\url{https://nydus.dev/}}
+}
+
+@misc{soci,
+  title        = {SOCI Snapshotter},
+  author       = {{Amazon}},
+  howpublished = {\url{https://github.com/awslabs/soci-snapshotter}}
 }
 
 @misc{trivy,
   title        = {Trivy: Find vulnerabilities, misconfigurations, secrets, SBOM in containers, Kubernetes, code repositories, clouds and more},
   author       = {{Aqua Security}},
-  year         = {2024},
-  howpublished = {\url{https://github.com/aquasecurity/trivy}}
-}
-
-@misc{trivydocs,
-  title        = {Trivy Documentation},
-  author       = {{Aqua Security}},
-  year         = {2024},
   howpublished = {\url{https://trivy.dev/}}
 }
 
 @misc{clair,
   title        = {Clair: Vulnerability Static Analysis for Containers},
-  author       = {{Project Clair}},
-  year         = {2024},
+  author       = {{Quay}},
   howpublished = {\url{https://github.com/quay/clair}}
-}
-
-@misc{clairdocs,
-  title        = {Clair Documentation},
-  author       = {{Project Clair}},
-  year         = {2024},
-  howpublished = {\url{https://quay.github.io/clair/}}
 }
 
 @misc{grype,
   title        = {Grype: A vulnerability scanner for container images and filesystems},
   author       = {{Anchore}},
-  year         = {2024},
   howpublished = {\url{https://github.com/anchore/grype}}
 }
 
 @misc{syft,
   title        = {Syft: CLI tool and library for generating a Software Bill of Materials from container images and filesystems},
   author       = {{Anchore}},
-  year         = {2024},
   howpublished = {\url{https://github.com/anchore/syft}}
 }
 
 @misc{harbor,
   title        = {Harbor: Cloud Native Repository for Kubernetes},
   author       = {{CNCF / Harbor project}},
-  year         = {2024},
   howpublished = {\url{https://goharbor.io/}}
 }
 
 @misc{cve,
   title        = {Common Vulnerabilities and Exposures (CVE)},
   author       = {{The MITRE Corporation}},
-  year         = {2024},
   howpublished = {\url{https://www.cve.org/}}
 }
 
 @misc{nvd,
   title        = {National Vulnerability Database},
   author       = {{National Institute of Standards and Technology (NIST)}},
-  year         = {2024},
   howpublished = {\url{https://nvd.nist.gov/}}
 }
 
 @misc{cyclonedx,
   title        = {{CycloneDX}: a full-stack Bill of Materials (BOM) standard},
   author       = {{OWASP Foundation}},
-  year         = {2024},
   howpublished = {\url{https://cyclonedx.org/}}
 }
 
 @misc{spdx,
   title        = {{SPDX}: System Package Data Exchange Specification},
   author       = {{Linux Foundation}},
-  year         = {2024},
   howpublished = {\url{https://spdx.dev/}}
 }
 
 @misc{purl,
   title        = {Package URL (purl) Specification},
-  year         = {2024},
   howpublished = {\url{https://github.com/package-url/purl-spec}}
 }
 
 @misc{ggcr,
   title        = {go-containerregistry: Go library and CLIs for working with container registries},
   author       = {{Google}},
-  year         = {2024},
   howpublished = {\url{https://github.com/google/go-containerregistry}}
 }
 
@@ -171,20 +119,5 @@
 @misc{harborscanadapter,
   title        = {Harbor Pluggable Scanner API},
   author       = {{CNCF / Harbor project}},
-  year         = {2024},
   howpublished = {\url{https://github.com/goharbor/pluggable-scanner-spec}}
-}
-
-@misc{tokunaga2021estargz,
-  title        = {Startup Containers in Lightning Speed with Lazy Image Distribution on Containerd},
-  author       = {Tokunaga, Kohei},
-  year         = {2021},
-  howpublished = {KubeCon + CloudNativeCon Europe 2021}
-}
-
-@misc{containerd,
-  title        = {containerd: An industry-standard container runtime with an emphasis on simplicity, robustness, and portability},
-  author       = {{containerd project}},
-  year         = {2024},
-  howpublished = {\url{https://containerd.io/}}
 }

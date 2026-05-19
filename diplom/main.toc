@@ -49,7 +49,7 @@
 \contentsline {subsubsection}{\numberline {6.2.1}Архитектура фреймворка}{35}{subsubsection.6.2.1}%
 \contentsline {subsubsection}{\numberline {6.2.2}Развертывание окружения}{36}{subsubsection.6.2.2}%
 \contentsline {subsection}{\numberline {6.3}Обзор результатов и сравнение}{36}{subsection.6.3}%
-\contentsline {subsubsection}{\numberline {6.3.1}Производительность сканирования}{37}{subsubsection.6.3.1}%
+\contentsline {subsubsection}{\numberline {6.3.1}Производительность сканирования}{36}{subsubsection.6.3.1}%
 \contentsline {subsubsection}{\numberline {6.3.2}Объём скачиваемых данных}{38}{subsubsection.6.3.2}%
 \contentsline {subsubsection}{\numberline {6.3.3}Корректность результатов}{40}{subsubsection.6.3.3}%
 \contentsline {subsection}{\numberline {6.4}Обсуждение результатов}{40}{subsection.6.4}%

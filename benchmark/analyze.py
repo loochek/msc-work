@@ -15,6 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import numpy as np
 
 BASE_ORDER = ["ubuntu", "alpine", "fedora", "python", "node", "golang"]
@@ -200,6 +201,181 @@ def plot_image_size(ax, results):
     ax.grid(axis="y", alpha=0.3)
 
 
+# ── Chart 5: File stats pie charts ──────────────────────────────────────────
+
+NOT_REQUIRED_LABEL = "(not required)"
+NOT_REQUIRED_COLOR = "#d0d0d0"
+
+# Colors for analyzer types actually observed in benchmark data.
+ANALYZER_PALETTE = {
+    # secret scanning (appears in all image types, ~7-10%)
+    "secret":       "#e45756",
+    # dpkg-family (debian-based: ubuntu, python, node)
+    "dpkg-license": "#4c78a8",
+    "dpkg":         "#2e5c8a",
+    "debian":       "#1a3f6b",
+    "ubuntu":       "#2a4f7b",
+    # apk-family (alpine)
+    "apk":          "#54a24b",
+    "apk-repo":     "#3a8433",
+    "alpine":       "#2a6424",
+    # rpm-family (fedora)
+    "rpm":          "#c0392b",
+    "fedora":       "#922b21",
+    # language analyzers
+    "node-pkg":     "#e9c46a",
+    "python-pkg":   "#f58518",
+    # os metadata (appears as 1-2 files per image)
+    "os-release":   "#999999",
+}
+
+
+def load_stats_dir(stats_dir: Path) -> dict[str, list[dict]]:
+    """Load all stats JSON files from stats_dir, grouped by base image type."""
+    groups: dict[str, list] = defaultdict(list)
+    for path in sorted(stats_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+            btype = base_type(data.get("image", path.stem))
+            if btype in BASE_ORDER:
+                groups[btype].append(data)
+        except Exception:
+            pass
+    return groups
+
+
+def _sum_files_by_analyzer(stats_list: list[dict]) -> tuple[dict[str, int], dict[str, int]]:
+    """Sum file counts and bytes per required_by category across all stats JSONs.
+
+    Each file is counted exactly once:
+      - under its first required_by analyzer if required_by is non-empty,
+      - under NOT_REQUIRED_LABEL otherwise.
+    Cached layers are skipped (no file list available).
+    Returns (counts, sizes_bytes).
+    """
+    counts: dict[str, int] = defaultdict(int)
+    sizes:  dict[str, int] = defaultdict(int)
+    for stats_data in stats_list:
+        for layer in stats_data.get("layers", []):
+            if layer.get("cached"):
+                continue
+            for f in layer.get("files") or []:
+                rb  = f.get("required_by") or []
+                key = rb[0] if rb else NOT_REQUIRED_LABEL
+                counts[key] += 1
+                sizes[key]  += f.get("size", 0)
+    return dict(counts), dict(sizes)
+
+
+def _fmt_bytes(n: int) -> str:
+    if n >= 1024 ** 3:
+        return f"{n / 1024**3:.1f} GB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024**2:.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n} B"
+
+
+def _build_color_map(stats_groups: dict[str, list]) -> dict[str, str]:
+    """Assign a stable color to every analyzer type seen across all groups."""
+    all_analyzers = sorted({
+        k
+        for g in stats_groups.values()
+        for s in g
+        for k in _sum_files_by_analyzer([s])[0]
+        if k != NOT_REQUIRED_LABEL
+    })
+    tab10 = list(plt.cm.tab10.colors)
+    palette_colors = set(ANALYZER_PALETTE.values())
+    fallback = [c for c in tab10 if c not in palette_colors]
+    fb_idx = 0
+    color_map: dict[str, str] = {NOT_REQUIRED_LABEL: NOT_REQUIRED_COLOR}
+    for name in all_analyzers:
+        if name in ANALYZER_PALETTE:
+            color_map[name] = ANALYZER_PALETTE[name]
+        else:
+            color_map[name] = fallback[fb_idx % len(fallback)]
+            fb_idx += 1
+    return color_map
+
+
+def _draw_pie(ax, values: dict[str, int | float], color_map: dict,
+              title: str, legend_fmt):
+    """Draw a single pie chart on ax. legend_fmt(key, val) → legend label string."""
+    if not values:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center", fontsize=10)
+        ax.set_title(title, fontweight="bold")
+        ax.axis("off")
+        return
+
+    ordered = [NOT_REQUIRED_LABEL] + sorted(
+        [k for k in values if k != NOT_REQUIRED_LABEL],
+        key=lambda k: values[k], reverse=True,
+    )
+    ordered = [k for k in ordered if k in values]
+
+    sizes  = [values[k] for k in ordered]
+    colors = [color_map.get(k, "#999999") for k in ordered]
+    total  = sum(sizes)
+
+    wedges, _, autotexts = ax.pie(
+        sizes, colors=colors,
+        autopct=lambda pct: f"{pct:.1f}%" if pct >= 1.5 else "",
+        pctdistance=0.78, startangle=90,
+        wedgeprops={"linewidth": 0.4, "edgecolor": "white"},
+    )
+    for at in autotexts:
+        at.set_fontsize(7)
+
+    ax.legend(
+        wedges, [legend_fmt(k, values[k]) for k in ordered],
+        loc="center left", bbox_to_anchor=(1.02, 0.5),
+        fontsize=7, title=legend_fmt(None, total), title_fontsize=7,
+    )
+    ax.set_title(title, fontweight="bold")
+
+
+def _make_pies_figure(stats_groups: dict[str, list], use_bytes: bool) -> plt.Figure:
+    """2-row × 3-col grid of pie charts.
+
+    use_bytes=False → slice size = file count
+    use_bytes=True  → slice size = total bytes
+    """
+    ncols, nrows = 3, 2
+    metric = "file size (bytes)" if use_bytes else "file count"
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 10))
+    fig.suptitle(
+        f"File distribution by Trivy analyzer requirement — {metric}\n",
+        fontsize=12,
+    )
+
+    color_map = _build_color_map(stats_groups)
+
+    for i, base in enumerate(BASE_ORDER):
+        stats  = stats_groups.get(base, [])
+        counts, sizes = _sum_files_by_analyzer(stats)
+        values = sizes if use_bytes else counts
+
+        if use_bytes:
+            legend_fmt = lambda k, v: f"total: {_fmt_bytes(v)}" if k is None \
+                                      else f"{k}  ({_fmt_bytes(v)})"
+        else:
+            legend_fmt = lambda k, v: f"total: {v:,} files" if k is None \
+                                      else f"{k}  ({v:,})"
+
+        _draw_pie(
+            axes.flat[i], values, color_map,
+            title=f"{base}  ({len(stats)} imgs)",
+            legend_fmt=legend_fmt,
+        )
+
+    for i in range(len(BASE_ORDER), nrows * ncols):
+        axes.flat[i].axis("off")
+
+    return fig
+
+
 # ── Chart 4: Time vs image size ─────────────────────────────────────────────
 
 def plot_time_to_image_size(ax, results):
@@ -245,6 +421,9 @@ def parse_args() -> argparse.Namespace:
                    help="results.json files from run_benchmark.py")
     p.add_argument("--outdir", type=Path, default=Path("."),
                    help="Directory for output PNGs (default: current dir)")
+    p.add_argument("--stats-dir", type=Path, default=None,
+                   help="Directory with trivy --stats-file JSON outputs; "
+                        "enables chart-file-stats.png")
     p.add_argument("--dpi", type=int, default=150)
     return p.parse_args()
 
@@ -262,6 +441,17 @@ def main():
         fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
         plt.close(fig)
         print(f"Saved: {out}")
+
+    if args.stats_dir and args.stats_dir.is_dir():
+        stats_groups = load_stats_dir(args.stats_dir)
+        for use_bytes, name in [(False, "chart-file-stats-count.png"),
+                                (True,  "chart-file-stats-bytes.png")]:
+            fig = _make_pies_figure(stats_groups, use_bytes=use_bytes)
+            plt.tight_layout()
+            out = args.outdir / name
+            fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
+            plt.close(fig)
+            print(f"Saved: {out}")
 
 
 if __name__ == "__main__":

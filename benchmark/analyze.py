@@ -336,13 +336,17 @@ def _draw_pie(ax, values: dict[str, int | float], color_map: dict,
     ax.set_title(title, fontweight="bold")
 
 
-def plot_file_stats_pies(stats_groups: dict[str, list]) -> plt.Figure:
-    """4-row × 3-col grid: top two rows = file counts, bottom two = bytes."""
-    ncols = 3
-    nrows = 4   # 2 rows counts + 2 rows bytes
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 20))
+def _make_pies_figure(stats_groups: dict[str, list], use_bytes: bool) -> plt.Figure:
+    """2-row × 3-col grid of pie charts.
+
+    use_bytes=False → slice size = file count
+    use_bytes=True  → slice size = total bytes
+    """
+    ncols, nrows = 3, 2
+    metric = "File size (bytes)" if use_bytes else "File count"
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 10))
     fig.suptitle(
-        "File distribution by analyzer requirement\n"
+        f"File distribution by analyzer requirement — {metric}\n"
         "(total across all images of each type, non-cached layers only)",
         fontsize=12,
     )
@@ -350,40 +354,25 @@ def plot_file_stats_pies(stats_groups: dict[str, list]) -> plt.Figure:
     color_map = _build_color_map(stats_groups)
 
     for i, base in enumerate(BASE_ORDER):
-        stats = stats_groups.get(base, [])
+        stats  = stats_groups.get(base, [])
         counts, sizes = _sum_files_by_analyzer(stats)
-        n_images = len(stats)
-        subtitle = f"{base}  ({n_images} imgs)"
+        values = sizes if use_bytes else counts
 
-        # Top half — file counts
+        if use_bytes:
+            legend_fmt = lambda k, v: f"total: {_fmt_bytes(v)}" if k is None \
+                                      else f"{k}  ({_fmt_bytes(v)})"
+        else:
+            legend_fmt = lambda k, v: f"total: {v:,} files" if k is None \
+                                      else f"{k}  ({v:,})"
+
         _draw_pie(
-            axes.flat[i], counts, color_map,
-            title=subtitle,
-            legend_fmt=lambda k, v: f"total: {v:,} files" if k is None
-                                    else f"{k}  ({v:,})",
+            axes.flat[i], values, color_map,
+            title=f"{base}  ({len(stats)} imgs)",
+            legend_fmt=legend_fmt,
         )
 
-        # Bottom half — bytes
-        _draw_pie(
-            axes.flat[i + ncols * 2], sizes, color_map,
-            title=subtitle,
-            legend_fmt=lambda k, v: f"total: {_fmt_bytes(v)}" if k is None
-                                    else f"{k}  ({_fmt_bytes(v)})",
-        )
-
-    # Row separators / section labels
-    for row, label in [(0, "File count"), (2, "File size (bytes)")]:
-        axes.flat[row * ncols].annotate(
-            label, xy=(0, 0.5), xycoords="axes fraction",
-            xytext=(-0.15, 0.5), textcoords="axes fraction",
-            fontsize=11, fontweight="bold", rotation=90,
-            ha="center", va="center",
-        )
-
-    # Hide unused cells (rows 1 and 3 middle+right if BASE_ORDER < 6)
-    for i in range(len(BASE_ORDER), ncols * 2):
+    for i in range(len(BASE_ORDER), nrows * ncols):
         axes.flat[i].axis("off")
-        axes.flat[i + ncols * 2].axis("off")
 
     return fig
 
@@ -456,12 +445,14 @@ def main():
 
     if args.stats_dir and args.stats_dir.is_dir():
         stats_groups = load_stats_dir(args.stats_dir)
-        fig = plot_file_stats_pies(stats_groups)
-        plt.tight_layout()
-        out = args.outdir / "chart-file-stats.png"
-        fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
-        plt.close(fig)
-        print(f"Saved: {out}")
+        for use_bytes, name in [(False, "chart-file-stats-count.png"),
+                                (True,  "chart-file-stats-bytes.png")]:
+            fig = _make_pies_figure(stats_groups, use_bytes=use_bytes)
+            plt.tight_layout()
+            out = args.outdir / name
+            fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
+            plt.close(fig)
+            print(f"Saved: {out}")
 
 
 if __name__ == "__main__":

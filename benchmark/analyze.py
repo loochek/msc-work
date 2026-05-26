@@ -244,113 +244,146 @@ def load_stats_dir(stats_dir: Path) -> dict[str, list[dict]]:
     return groups
 
 
-def _count_files_by_analyzer(stats_data: dict) -> dict[str, int]:
-    """Count files per category for one stats JSON.
+def _sum_files_by_analyzer(stats_list: list[dict]) -> tuple[dict[str, int], dict[str, int]]:
+    """Sum file counts and bytes per required_by category across all stats JSONs.
 
     Each file is counted exactly once:
       - under its first required_by analyzer if required_by is non-empty,
       - under NOT_REQUIRED_LABEL otherwise.
     Cached layers are skipped (no file list available).
+    Returns (counts, sizes_bytes).
     """
     counts: dict[str, int] = defaultdict(int)
-    for layer in stats_data.get("layers", []):
-        if layer.get("cached"):
-            continue
-        for f in layer.get("files") or []:
-            rb = f.get("required_by") or []
-            counts[rb[0] if rb else NOT_REQUIRED_LABEL] += 1
-    return counts
+    sizes:  dict[str, int] = defaultdict(int)
+    for stats_data in stats_list:
+        for layer in stats_data.get("layers", []):
+            if layer.get("cached"):
+                continue
+            for f in layer.get("files") or []:
+                rb  = f.get("required_by") or []
+                key = rb[0] if rb else NOT_REQUIRED_LABEL
+                counts[key] += 1
+                sizes[key]  += f.get("size", 0)
+    return dict(counts), dict(sizes)
 
 
-def _avg_file_counts(stats_list: list[dict]) -> dict[str, float]:
-    """Average file counts over a list of stats JSONs."""
-    if not stats_list:
-        return {}
-    totals: dict[str, float] = defaultdict(float)
-    for s in stats_list:
-        for k, v in _count_files_by_analyzer(s).items():
-            totals[k] += v
-    return {k: v / len(stats_list) for k, v in totals.items()}
+def _fmt_bytes(n: int) -> str:
+    if n >= 1024 ** 3:
+        return f"{n / 1024**3:.1f} GB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024**2:.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n} B"
 
 
-def plot_file_stats_pies(stats_groups: dict[str, list]) -> plt.Figure:
-    """6-panel pie chart grid — one pie per base image type."""
-    ncols, nrows = 3, 2
-    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 10))
-    fig.suptitle(
-        "File distribution by analyzer requirement\n(avg per image type, non-cached layers only)",
-        fontsize=12,
-    )
-
-    # Build a stable color map: pre-assign colors to analyzer names seen across
-    # all groups so the same analyzer has the same color in every pie.
-    all_analyzers = sorted(
-        {k for g in stats_groups.values() for s in g
-         for k in _count_files_by_analyzer(s) if k != NOT_REQUIRED_LABEL}
-    )
-    tab10 = plt.cm.tab10.colors
-    extra_idx = 0
-    color_map: dict[str, str] = {}
+def _build_color_map(stats_groups: dict[str, list]) -> dict[str, str]:
+    """Assign a stable color to every analyzer type seen across all groups."""
+    all_analyzers = sorted({
+        k
+        for g in stats_groups.values()
+        for s in g
+        for k in _sum_files_by_analyzer([s])[0]
+        if k != NOT_REQUIRED_LABEL
+    })
+    tab10 = list(plt.cm.tab10.colors)
+    palette_colors = set(ANALYZER_PALETTE.values())
+    fallback = [c for c in tab10 if c not in palette_colors]
+    fb_idx = 0
+    color_map: dict[str, str] = {NOT_REQUIRED_LABEL: NOT_REQUIRED_COLOR}
     for name in all_analyzers:
         if name in ANALYZER_PALETTE:
             color_map[name] = ANALYZER_PALETTE[name]
         else:
-            # fall back to tab10, skip colors already claimed by ANALYZER_PALETTE
-            while tab10[extra_idx % len(tab10)] in ANALYZER_PALETTE.values():
-                extra_idx += 1
-            color_map[name] = tab10[extra_idx % len(tab10)]
-            extra_idx += 1
-    color_map[NOT_REQUIRED_LABEL] = NOT_REQUIRED_COLOR
+            color_map[name] = fallback[fb_idx % len(fallback)]
+            fb_idx += 1
+    return color_map
+
+
+def _draw_pie(ax, values: dict[str, int | float], color_map: dict,
+              title: str, legend_fmt):
+    """Draw a single pie chart on ax. legend_fmt(key, val) → legend label string."""
+    if not values:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center", fontsize=10)
+        ax.set_title(title, fontweight="bold")
+        ax.axis("off")
+        return
+
+    ordered = [NOT_REQUIRED_LABEL] + sorted(
+        [k for k in values if k != NOT_REQUIRED_LABEL],
+        key=lambda k: values[k], reverse=True,
+    )
+    ordered = [k for k in ordered if k in values]
+
+    sizes  = [values[k] for k in ordered]
+    colors = [color_map.get(k, "#999999") for k in ordered]
+    total  = sum(sizes)
+
+    wedges, _, autotexts = ax.pie(
+        sizes, colors=colors,
+        autopct=lambda pct: f"{pct:.1f}%" if pct >= 1.5 else "",
+        pctdistance=0.78, startangle=90,
+        wedgeprops={"linewidth": 0.4, "edgecolor": "white"},
+    )
+    for at in autotexts:
+        at.set_fontsize(7)
+
+    ax.legend(
+        wedges, [legend_fmt(k, values[k]) for k in ordered],
+        loc="center left", bbox_to_anchor=(1.02, 0.5),
+        fontsize=7, title=legend_fmt(None, total), title_fontsize=7,
+    )
+    ax.set_title(title, fontweight="bold")
+
+
+def plot_file_stats_pies(stats_groups: dict[str, list]) -> plt.Figure:
+    """4-row × 3-col grid: top two rows = file counts, bottom two = bytes."""
+    ncols = 3
+    nrows = 4   # 2 rows counts + 2 rows bytes
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 20))
+    fig.suptitle(
+        "File distribution by analyzer requirement\n"
+        "(total across all images of each type, non-cached layers only)",
+        fontsize=12,
+    )
+
+    color_map = _build_color_map(stats_groups)
 
     for i, base in enumerate(BASE_ORDER):
-        ax = axes.flat[i]
-        counts = _avg_file_counts(stats_groups.get(base, []))
+        stats = stats_groups.get(base, [])
+        counts, sizes = _sum_files_by_analyzer(stats)
+        n_images = len(stats)
+        subtitle = f"{base}  ({n_images} imgs)"
 
-        if not counts:
-            ax.text(0.5, 0.5, "no data", ha="center", va="center", fontsize=10)
-            ax.set_title(base, fontweight="bold")
-            ax.axis("off")
-            continue
-
-        # Order: (not required) first (big gray slice), then others by count desc.
-        ordered = [NOT_REQUIRED_LABEL] + sorted(
-            [k for k in counts if k != NOT_REQUIRED_LABEL],
-            key=lambda k: counts[k],
-            reverse=True,
+        # Top half — file counts
+        _draw_pie(
+            axes.flat[i], counts, color_map,
+            title=subtitle,
+            legend_fmt=lambda k, v: f"total: {v:,} files" if k is None
+                                    else f"{k}  ({v:,})",
         )
-        ordered = [k for k in ordered if k in counts]
 
-        sizes  = [counts[k] for k in ordered]
-        colors = [color_map.get(k, "#999999") for k in ordered]
-        total  = sum(sizes)
-
-        def autopct_fn(pct):
-            return f"{pct:.1f}%" if pct >= 1.5 else ""
-
-        wedges, _, autotexts = ax.pie(
-            sizes,
-            colors=colors,
-            autopct=autopct_fn,
-            pctdistance=0.78,
-            startangle=90,
-            wedgeprops={"linewidth": 0.4, "edgecolor": "white"},
+        # Bottom half — bytes
+        _draw_pie(
+            axes.flat[i + ncols * 2], sizes, color_map,
+            title=subtitle,
+            legend_fmt=lambda k, v: f"total: {_fmt_bytes(v)}" if k is None
+                                    else f"{k}  ({_fmt_bytes(v)})",
         )
-        for at in autotexts:
-            at.set_fontsize(7)
 
-        legend_labels = [
-            f"{k}  ({counts[k]:.0f})" for k in ordered
-        ]
-        ax.legend(
-            wedges, legend_labels,
-            loc="center left", bbox_to_anchor=(1.02, 0.5),
-            fontsize=7, title=f"n≈{total:.0f} files", title_fontsize=7,
+    # Row separators / section labels
+    for row, label in [(0, "File count"), (2, "File size (bytes)")]:
+        axes.flat[row * ncols].annotate(
+            label, xy=(0, 0.5), xycoords="axes fraction",
+            xytext=(-0.15, 0.5), textcoords="axes fraction",
+            fontsize=11, fontweight="bold", rotation=90,
+            ha="center", va="center",
         )
-        n_images = len(stats_groups.get(base, []))
-        ax.set_title(f"{base}  ({n_images} images)", fontweight="bold")
 
-    for i in range(len(BASE_ORDER), nrows * ncols):
+    # Hide unused cells (rows 1 and 3 middle+right if BASE_ORDER < 6)
+    for i in range(len(BASE_ORDER), ncols * 2):
         axes.flat[i].axis("off")
+        axes.flat[i + ncols * 2].axis("off")
 
     return fig
 

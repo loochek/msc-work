@@ -318,9 +318,9 @@ def _run_trivy(
     return r
 
 
-def run_trivy(image_ref: str, trivy_stats_dir: Path | None = None, **_) -> ScanResult:
-    return _run_trivy(image_ref, extra_flags=["--scanners", "vuln"],
-                      stats_dir=trivy_stats_dir)
+def run_trivy(image_ref: str, trivy_estargz_binary: str, trivy_stats_dir: Path | None = None, **_) -> ScanResult:
+    return _run_trivy(image_ref, extra_flags=["--scanners", "vuln"],  # , "--skip-analyzers", "gobinary,rustbinary"
+                      stats_dir=trivy_stats_dir, binary=trivy_estargz_binary)
 
 
 def run_trivy_estargz(image_ref: str, trivy_estargz_binary: str, estargz_tag_suffix: str,
@@ -330,7 +330,7 @@ def run_trivy_estargz(image_ref: str, trivy_estargz_binary: str, estargz_tag_suf
         estargz_ref,
         binary=trivy_estargz_binary,
         scanner_name="trivy-estargz",
-        extra_flags=["--estargz", "--scanners", "vuln"],
+        extra_flags=["--estargz", "--scanners", "vuln"],  # , "--skip-analyzers", "gobinary,rustbinary"
         stats_dir=trivy_stats_dir,
     )
 

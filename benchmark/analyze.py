@@ -366,7 +366,7 @@ def _make_pies_figure(stats_groups: dict[str, list], use_bytes: bool) -> plt.Fig
 
         _draw_pie(
             axes.flat[i], values, color_map,
-            title=f"{base}  ({len(stats)} imgs)",
+            title=f"{base}",
             legend_fmt=legend_fmt,
         )
 

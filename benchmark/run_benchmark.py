@@ -252,16 +252,29 @@ def _parse_estargz_layer_stats(stderr: str) -> tuple[dict[str, EStargzLayerStat]
     return layer_stats, fallback_diff_ids
 
 
+def _stats_path(image_ref: str, stats_dir: Path) -> Path:
+    """Map an image ref to a JSON filename inside stats_dir."""
+    safe = re.sub(r"[^\w.\-]", "_", image_ref)
+    return stats_dir / f"{safe}.json"
+
+
 def _run_trivy(
     image_ref: str,
     binary: str = "trivy",
     scanner_name: str = "trivy",
-    extra_flags: list[str] | None = None
+    extra_flags: list[str] | None = None,
+    stats_dir: Path | None = None,
 ) -> ScanResult:
+    stats_flags: list[str] = []
+    if stats_dir is not None:
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        stats_flags = ["--stats-file", str(_stats_path(image_ref, stats_dir))]
+
     cmd = [
         binary, "image", "--format", "json",
         "--debug", "--skip-db-update", "--skip-java-db-update",
         *(extra_flags or []),
+        *stats_flags,
         image_ref,
     ]
 
@@ -305,17 +318,20 @@ def _run_trivy(
     return r
 
 
-def run_trivy(image_ref: str, **_) -> ScanResult:
-    return _run_trivy(image_ref, extra_flags=["--scanners", "vuln"])
+def run_trivy(image_ref: str, trivy_stats_dir: Path | None = None, **_) -> ScanResult:
+    return _run_trivy(image_ref, extra_flags=["--scanners", "vuln"],
+                      stats_dir=trivy_stats_dir)
 
 
-def run_trivy_estargz(image_ref: str, trivy_estargz_binary: str, estargz_tag_suffix: str, **_) -> ScanResult:
+def run_trivy_estargz(image_ref: str, trivy_estargz_binary: str, estargz_tag_suffix: str,
+                      trivy_stats_dir: Path | None = None, **_) -> ScanResult:
     estargz_ref = f"{image_ref}{estargz_tag_suffix}"
     return _run_trivy(
         estargz_ref,
         binary=trivy_estargz_binary,
         scanner_name="trivy-estargz",
         extra_flags=["--estargz", "--scanners", "vuln"],
+        stats_dir=trivy_stats_dir,
     )
 
 ###############################################################################
@@ -608,6 +624,10 @@ def parse_args() -> argparse.Namespace:
                    help="Path to trivy binary with eStargz support (default: /tmp/trivy-estargz)")
     p.add_argument("--estargz-tag-suffix", default="-estargz",
                    help="Tag suffix appended to image refs for eStargz variants (default: -estargz)")
+    p.add_argument("--trivy-stats-dir", type=Path, default=None,
+                   metavar="DIR",
+                   help="Directory to save per-image Trivy stats JSON files "
+                        "(default: trivy_stats next to --output; pass empty string to disable)")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Verbose output")
     return p.parse_args()
@@ -625,6 +645,10 @@ def main():
     registry = manifest["params"]["registry"]
 
     log.info(f"Loaded {len(images)} images from {args.manifest}")
+
+    trivy_stats_dir: Path | None = args.trivy_stats_dir
+    if trivy_stats_dir is None and any(s in args.scanners for s in ("trivy", "trivy-estargz")):
+        trivy_stats_dir = args.output.parent / "trivy_stats"
 
     if "clair" in args.scanners and not args.clair_url:
         log.error("--clair-url required when using --scanners clair")
@@ -646,6 +670,7 @@ def main():
         clair_psk=args.clair_psk,
         trivy_estargz_binary=args.trivy_estargz_binary,
         estargz_tag_suffix=args.estargz_tag_suffix,
+        trivy_stats_dir=trivy_stats_dir,
     )
 
     output = {
@@ -660,6 +685,8 @@ def main():
 
     args.output.write_text(json.dumps(output, indent=2) + "\n")
     log.info(f"Results saved to {args.output}")
+    if trivy_stats_dir is not None:
+        log.info(f"Trivy stats written to {trivy_stats_dir}/")
 
     for scanner in args.scanners:
         sc = [r for r in results if r["scanner"] == scanner]

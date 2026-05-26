@@ -343,11 +343,10 @@ def _make_pies_figure(stats_groups: dict[str, list], use_bytes: bool) -> plt.Fig
     use_bytes=True  → slice size = total bytes
     """
     ncols, nrows = 3, 2
-    metric = "File size (bytes)" if use_bytes else "File count"
+    metric = "file size (bytes)" if use_bytes else "file count"
     fig, axes = plt.subplots(nrows, ncols, figsize=(15, 10))
     fig.suptitle(
-        f"File distribution by analyzer requirement — {metric}\n"
-        "(total across all images of each type, non-cached layers only)",
+        f"File distribution by Trivy analyzer requirement — {metric}\n",
         fontsize=12,
     )
 

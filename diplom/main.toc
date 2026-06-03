@@ -39,18 +39,19 @@
 \contentsline {section}{\numberline {6}Экспериментальная оценка}{36}{section.6}%
 \contentsline {subsection}{\numberline {6.1}Методология бенчмарка}{36}{subsection.6.1}%
 \contentsline {subsubsection}{\numberline {6.1.1}Тестовый набор образов}{36}{subsubsection.6.1.1}%
-\contentsline {subsubsection}{\numberline {6.1.2}Метрики}{37}{subsubsection.6.1.2}%
-\contentsline {subsubsection}{\numberline {6.1.3}Условия запуска и воспроизводимость}{38}{subsubsection.6.1.3}%
-\contentsline {subsection}{\numberline {6.2}Разработка тестового фреймворка}{38}{subsection.6.2}%
-\contentsline {subsubsection}{\numberline {6.2.1}Архитектура фреймворка}{39}{subsubsection.6.2.1}%
-\contentsline {subsubsection}{\numberline {6.2.2}Развертывание окружения}{39}{subsubsection.6.2.2}%
-\contentsline {subsection}{\numberline {6.3}Обзор результатов и сравнение}{39}{subsection.6.3}%
-\contentsline {subsubsection}{\numberline {6.3.1}Производительность сканирования}{39}{subsubsection.6.3.1}%
-\contentsline {subsubsection}{\numberline {6.3.2}Объём скачиваемых данных}{41}{subsubsection.6.3.2}%
-\contentsline {subsubsection}{\numberline {6.3.3}Корректность результатов}{43}{subsubsection.6.3.3}%
-\contentsline {subsection}{\numberline {6.4}Обсуждение результатов}{43}{subsection.6.4}%
-\contentsline {subsubsection}{\numberline {6.4.1}Ограничения экспериментальной оценки}{44}{subsubsection.6.4.1}%
-\contentsline {section}{\numberline {7}Заключение}{46}{section.7}%
-\contentsline {subsection}{\numberline {7.1}Ограничения подхода и направления дальнейшего развития}{47}{subsection.7.1}%
-\contentsline {subsection}{\numberline {7.2}Итог}{48}{subsection.7.2}%
-\contentsline {section}{Приложение}{51}{section*.11}%
+\contentsline {subsubsection}{\numberline {6.1.2}Соответствие тестового набора реальной нагрузке}{37}{subsubsection.6.1.2}%
+\contentsline {subsubsection}{\numberline {6.1.3}Метрики}{38}{subsubsection.6.1.3}%
+\contentsline {subsubsection}{\numberline {6.1.4}Условия запуска и воспроизводимость}{39}{subsubsection.6.1.4}%
+\contentsline {subsection}{\numberline {6.2}Разработка тестового фреймворка}{39}{subsection.6.2}%
+\contentsline {subsubsection}{\numberline {6.2.1}Архитектура фреймворка}{40}{subsubsection.6.2.1}%
+\contentsline {subsubsection}{\numberline {6.2.2}Развертывание окружения}{40}{subsubsection.6.2.2}%
+\contentsline {subsection}{\numberline {6.3}Обзор результатов и сравнение}{40}{subsection.6.3}%
+\contentsline {subsubsection}{\numberline {6.3.1}Производительность сканирования}{40}{subsubsection.6.3.1}%
+\contentsline {subsubsection}{\numberline {6.3.2}Объём скачиваемых данных}{42}{subsubsection.6.3.2}%
+\contentsline {subsubsection}{\numberline {6.3.3}Корректность результатов}{44}{subsubsection.6.3.3}%
+\contentsline {subsection}{\numberline {6.4}Обсуждение результатов}{44}{subsection.6.4}%
+\contentsline {subsubsection}{\numberline {6.4.1}Ограничения экспериментальной оценки}{45}{subsubsection.6.4.1}%
+\contentsline {section}{\numberline {7}Заключение}{47}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Ограничения подхода и направления дальнейшего развития}{48}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}Итог}{49}{subsection.7.2}%
+\contentsline {section}{Приложение}{52}{section*.11}%

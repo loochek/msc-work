@@ -43,9 +43,9 @@
 Ключевая особенность процесса индексирования заключается в том, что информация о версиях программного обеспечения зачастую исходит не от самого этого ПО, а из \textit{метаданных} пакетных менеджеров и манифестов языковых зависимостей, присутствующих в образе. К таким метаданным относятся, например:
 
 \begin{itemize}
-\item \texttt{/var/lib/dpkg/*}~--- файл с информацией обо всех пакетах, установленных через apt/dpkg в Debian-based дистрибутивах;
+\item \texttt{/var/lib/dpkg/*}~--- файл с информацией обо всех пакетах, установленных через apt/dpkg в дистрибутивах, основанных на Debian;
 \item \texttt{/lib/apk/db/installed}~--- аналогичный файл для пакетного менеджера apk в Alpine Linux;
-\item \texttt{/var/lib/rpm/Packages}~--- база данных установленных пакетов в RPM-based дистрибутивах (CentOS, Fedora, Red Hat);
+\item \texttt{/var/lib/rpm/Packages}~--- база данных установленных пакетов в дистрибутивах, основанных на RPM (CentOS, Fedora, Red Hat);
 \item \texttt{requirements.txt}, \texttt{Pipfile.lock}, \texttt{poetry.lock} для Python-проектов;
 \item \texttt{package.json}, \texttt{package-lock.json}, \texttt{yarn.lock} для Node.js-проектов;
 \end{itemize}
